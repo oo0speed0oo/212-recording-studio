@@ -17,13 +17,21 @@ echo "== teleprompter logic (Redo / Skip / click-to-redo / range)"
 "$JSC" tests/test_prompter.js | tail -1 || fail=1
 "$JSC" tests/test_prompter.js > /dev/null || fail=1
 
-echo "== server (lists, saving audio, safety)"
+echo "== rules (sentence silence, auto-redo)"
+"$JSC" tests/test_rules.js | tail -1 || fail=1
+"$JSC" tests/test_rules.js > /dev/null || fail=1
+
+echo "== server (lists, options, saving audio, safety)"
 "$PY" -I tests/test_server.py 2>&1 | tail -4
 "$PY" -I tests/test_server.py > /dev/null 2>&1 || fail=1
 
 echo "== cutting, loudness, naming, .m4a files (R2)"
 "$PY" -I tests/test_processing.py 2>&1 | tail -4
 "$PY" -I tests/test_processing.py > /dev/null 2>&1 || fail=1
+
+echo "== challenge words, common words, sentences (R4)"
+"$PY" -I tests/test_lists.py 2>&1 | tail -4
+"$PY" -I tests/test_lists.py > /dev/null 2>&1 || fail=1
 
 echo "== check screen: file list, OK / Redo, audio playback, robot files (R3)"
 "$PY" -I tests/test_review.py 2>&1 | tail -4

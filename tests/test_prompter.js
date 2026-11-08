@@ -127,6 +127,21 @@ p.goTo(6, 'one');
 p.complete(take(61));
 eq(p.pointer, 7, 'normal flow again after a normal jump');
 
+print('option: stay on the redone item');
+p = make(10);
+for (i = 0; i < 6; i++) p.complete(take(i));
+p.stayAfterRedo = true;
+p.goTo(2, 'one');
+eq(p.pointer, 2, 'clicked item 3');
+p.complete(take(50));
+eq(p.pointer, 2, 'after the redo the pointer STAYS on item 3');
+eq(p.returnTo, null, 'no return point');
+eq(p.takes['sound:3:v1'].start, 50, 'item 3 has the new take');
+p.stayAfterRedo = false;
+p.goTo(1, 'one');
+p.complete(take(60));
+eq(p.pointer, 2, 'with the option off it returns to where it was (item 3, where the pointer had stayed)');
+
 print('');
 print(passes + ' passed, ' + fails + ' failed');
 if (fails) quit(1);

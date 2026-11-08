@@ -89,7 +89,7 @@ class Base(unittest.TestCase):
         s.update(settings)
         return studio.Studio(self.root, s)
 
-    def session(self, takes, sr=48000, seconds=14.0, room_db=-60, forced=(), wall=None, extra_audio=None):
+    def session(self, takes, sr=48000, seconds=14.0, room_db=-60, forced=(), wall=None, extra_audio=None, list_name="sounds"):
         """takes: { key: (start, end, signal or None) }. The signal (if any) is placed at `start`."""
         rng = np.random.default_rng(len(takes) + int(seconds))
         x = rng.standard_normal(int(sr * seconds))
@@ -104,7 +104,7 @@ class Base(unittest.TestCase):
         if extra_audio is not None:
             x = extra_audio(x, sr)
         pcm = (np.clip(x, -1, 1) * 32767).astype("<i2")
-        sid = self.studio.new_session("sounds", sr)["id"]
+        sid = self.studio.new_session(list_name, sr)["id"]
         self.studio.append_audio(sid, 0, pcm.tobytes())
         self.studio.save_times(sid, {"items": items})
         self.studio.close_session(sid)
@@ -293,8 +293,8 @@ class ProcessingTest(Base):
         self.session({"sound:2:v1": (2.0, 2.5, tone(sr, 0.5, 300, -26))})            # recorded, not cut yet
         r = self.studio.reset_list("sounds", everything=True)
         self.assertEqual(r["moved"], 1)
-        self.assertFalse(self.out("sounds").exists())
-        self.assertFalse(self.out("alone").exists())
+        self.assertFalse(self.out("sounds/1.m4a").exists())
+        self.assertFalse(self.out("alone/1.m4a").exists())
         self.assertEqual(self.progress(), {})
         old = Path(r["folder"])
         self.assertTrue((old / "output" / "sounds" / "1.m4a").exists())
@@ -329,7 +329,7 @@ class ProcessingTest(Base):
             st, lists = call("GET", "/api/lists")
             sounds = {c["id"]: c for c in lists["lists"]}["sounds"]
             self.assertEqual((sounds["done"], sounds["pending"]), (2, 0))
-            st, err = call("POST", "/api/process", {"list": "words"})
+            st, err = call("POST", "/api/process", {"list": "nope"})
             self.assertEqual(st, 404)
         finally:
             httpd.shutdown()

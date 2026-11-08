@@ -109,17 +109,31 @@
         this.lastLoudHop = h; this.silentCount = 0;
         this.takePeak = Math.max(this.takePeak, this.peak); this.takeSumsq += this.sumsq; this.takeHops++;
       } else if (++this.silentCount >= needSilent) {
-        var peakDb = this.takePeak > 1e-6 ? 20 * Math.log10(this.takePeak) : -120;
-        var rmsDb = this.takeSumsq > 0 ? 10 * Math.log10(this.takeSumsq / (this.takeHops * hop)) : -120;
-        ev.push({
-          type: 'end',
-          start: this.runStartHop * hop / this.sr,
-          end: (this.lastLoudHop + 1) * hop / this.sr,
-          peakDb: peakDb, rmsDb: rmsDb
-        });
+        ev.push(this._endEvent());
         this.cancel();
       }
     }
+  };
+
+  P._endEvent = function () {
+    var hop = this.hop;
+    var peakDb = this.takePeak > 1e-6 ? 20 * Math.log10(this.takePeak) : -120;
+    var rmsDb = this.takeSumsq > 0 ? 10 * Math.log10(this.takeSumsq / (this.takeHops * hop)) : -120;
+    return {
+      type: 'end',
+      start: this.runStartHop * hop / this.sr,
+      end: (this.lastLoudHop + 1) * hop / this.sr,
+      peakDb: peakDb, rmsDb: rmsDb
+    };
+  };
+
+  // "Done" button: end the take in progress right now instead of waiting for the silence. Returns the 'end' event, or null
+  // when no speech has started yet.
+  P.forceEnd = function () {
+    if (this.state !== 2) return null;
+    var ev = this._endEvent();
+    this.cancel();
+    return ev;
   };
 
   P._begin = function (ev) {

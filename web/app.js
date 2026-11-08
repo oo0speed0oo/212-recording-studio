@@ -20,7 +20,10 @@
     measure: null, paused: false, hold: null,
     sessionId: null, rec: 0, sent: 0, pcm: [], flushing: false, saveOk: true, timer: null,
     sessionItems: {}, events: [], todayBase: {}, offsetSamples: 0,
-    meterDb: -120, lastTake: null, statusTimer: null
+    meterDb: -120, lastTake: null, statusTimer: null,
+    opt: null, spec: null,                       // the options (settings.json) and what each may be
+    recent: [], playback: false, playSrc: null,  // the last 20 s of audio, for Careful mode playback
+    autoTries: {}, beatTimer: null
   };
 
   // ── small helpers ───────────────────────────────────────────────────────
@@ -28,6 +31,23 @@
   function db1(x) { return (Math.round(x * 10) / 10).toFixed(1).replace('-', '−'); }
   function now() { return Date.now() / 1000; }
   function recTime() { return S.rec / S.sr; }
+
+  // ── options: the server keeps them in settings.json ─────────────────────
+  function applyOptions(o) {
+    S.opt = o;
+    Detector.DEFAULTS.marginDb = o.sensitivity_margin_db;
+    Detector.DEFAULTS.stepDb = o.retry_step_db;
+    if (S.prompter) S.prompter.stayAfterRedo = o.after_redo === 'stay';
+    if (S.config) S.config.mic_tip = o.mic_tip;
+    if ($('mic-tip')) $('mic-tip').textContent = o.mic_tip;
+    if (S.mode === 'record' && S.detector) applyLevel();
+  }
+  function loadOptions() {
+    return api('GET', '/api/settings').then(function (r) { S.spec = r.spec; S.ns = r.values.noise_suppression; applyOptions(r.values); });
+  }
+  function saveOptions(values) {
+    return api('POST', '/api/settings', { values: values }).then(function (r) { S.spec = r.spec; applyOptions(r.values); return r.values; });
+  }
 
   function api(method, url, body, raw) {
     var opts = { method: method, headers: {} };
@@ -201,13 +221,15 @@
   function onBlock(x) {
     meter(x);
     if (S.mode === 'check') { if (S.measure) feedMeasure(x); return; }
-    if (S.mode !== 'record' || S.paused) return;
+    if (S.mode !== 'record' || S.paused || S.playback) return;
 
     // keep the raw take: 16-bit samples, queued for the 30-second autosave
     var pcm = new Int16Array(x.length);
     for (var i = 0; i < x.length; i++) { var v = x[i]; pcm[i] = v >= 1 ? 32767 : v <= -1 ? -32768 : Math.round(v * 32767); }
     S.pcm.push(pcm);
+    S.recent.push({ pos: S.rec, data: pcm });         // the last 20 s stay in memory for Careful mode
     S.rec += x.length;
+    while (S.recent.length > 1 && S.rec - (S.recent[0].pos + S.recent[0].data.length) > 20 * S.sr) S.recent.shift();
 
     var events = S.detector.push(x);                 // always runs, so its clock stays in step with the recording
     if (S.measure) { feedMeasure(x); S.detector.cancel(); return; }
@@ -216,9 +238,34 @@
     for (var k = 0; k < events.length; k++) {
       var ev = events[k];
       if (ev.type === 'start') setStatus('hear', 'Hearing you…');
-      else if (ev.type === 'end') takeDone({ start: ev.start, end: ev.end, peak_db: ev.peakDb, rms_db: ev.rmsDb, forced: false });
+      else if (ev.type === 'end') handleEnd(ev);
     }
   }
+
+  // The detector found the end of a take (or Done was pressed). Auto-redo may refuse it.
+  function handleEnd(ev) {
+    var cur = S.prompter.current();
+    if (!cur) return;
+    var t = { start: ev.start, end: ev.end, peak_db: ev.peakDb, rms_db: ev.rmsDb, forced: false };
+    var why = S.opt.auto_redo ? Rules.autoRedoReason(S.list.list, t, S.opt) : null;
+    if (why) {
+      var tries = S.autoTries[cur.key] || 0;
+      if (tries < S.opt.auto_redo_max_tries) {                 // not marked done: ask for it again
+        S.autoTries[cur.key] = tries + 1;
+        logEvent('auto_redo', { key: cur.key, why: why.code, ms: Math.round((t.end - t.start) * 1000), rms_db: Math.round(t.rms_db * 10) / 10, peak_db: Math.round(t.peak_db * 10) / 10 });
+        updateLast(t);
+        setStatus('warn', why.text + ': say it again');
+        var row = $('plist').children[S.prompter.pointer];
+        if (row) { row.classList.remove('bad'); void row.offsetWidth; row.classList.add('bad'); }
+        saveTimes();
+        return;
+      }
+      t.flag = why.code;                                       // asked enough times: keep this one, but remember the doubt
+    }
+    takeDone(t);
+  }
+
+  var FLAG_TEXT = { clip: 'too loud', short: 'very short', long: 'very long', quiet: 'very quiet' };
 
   // A take was found (by the detector or by hold-to-record) for the current item.
   function takeDone(t) {
@@ -226,17 +273,82 @@
     t.level = S.prompter.level;
     var r = S.prompter.complete(t);
     if (!r) return;
+    delete S.autoTries[r.key];
     S.sessionItems[r.key] = t;
     S.lastTake = t;
-    logEvent(t.forced ? 'hold' : 'take', { key: r.key, start: t.start, end: t.end });
+    logEvent(t.forced ? 'hold' : 'take', { key: r.key, start: t.start, end: t.end, flag: t.flag });
     S.detector.cancel();
     applyLevel();
     saveTimes();
     renderList(r.index);
-    flashStatus('got', 'Got it ✓', S.prompter.finished() ? 'All done: press Finish' : null);
+    flashStatus(t.flag ? 'warn' : 'got', t.flag ? 'Kept (' + FLAG_TEXT[t.flag] + ')' : 'Got it ✓');
+    updateLast(t);
     updateTop();
     updateControls();
     scrollToCurrent();
+    if (S.opt.mode === 'careful') playback(t, afterTake); else afterTake();
+  }
+  function afterTake() { if (S.opt.countdown && S.mode === 'record' && !S.prompter.finished()) beat(); }
+
+  function updateLast(t) {
+    var el = $('lasttake');
+    if (!el) return;
+    el.textContent = 'Last: ' + (t.end - t.start).toFixed(2) + ' s' + (t.rms_db != null ? ', ' + db1(t.rms_db) + ' dB' : '') + (t.flag ? ' (' + FLAG_TEXT[t.flag] + ')' : '');
+  }
+
+  // Careful mode: play the take back right after it is found. The recording clock stops while it plays,
+  // so the playback is never recorded.
+  function playback(t, then) {
+    var E = S.engine, sr = S.sr;
+    var a = Math.max(0, Math.floor((t.start - 0.15) * sr)), b = Math.min(S.rec, Math.ceil((t.end + 0.15) * sr));
+    var x = new Float32Array(Math.max(0, b - a));
+    S.recent.forEach(function (c) {
+      var s0 = Math.max(a, c.pos), s1 = Math.min(b, c.pos + c.data.length);
+      for (var i = s0; i < s1; i++) x[i - a] = c.data[i - c.pos] / 32768;
+    });
+    if (!E || x.length < sr * 0.05) { then(); return; }
+    S.playback = true;
+    S.detector.cancel();
+    setStatus('play', 'Playing back…');
+    var buf = E.ctx.createBuffer(1, x.length, sr);
+    buf.copyToChannel(x, 0);
+    var src = E.ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(E.ctx.destination);
+    S.playSrc = src;
+    src.onended = function () {
+      if (S.playSrc !== src) return;                           // stopped early by a button: already handled
+      S.playSrc = null;
+      setTimeout(function () {                                 // let the room go quiet before listening again
+        if (S.playSrc || !S.playback) return;
+        S.playback = false;
+        if (S.detector) S.detector.cancel();
+        restoreStatus();
+        then();
+      }, 350);
+    };
+    src.start();
+  }
+  function endPlayback() {
+    if (!S.playback) return;
+    var src = S.playSrc; S.playSrc = null; S.playback = false;
+    if (src) { try { src.stop(); } catch (e) {} }
+    if (S.detector) S.detector.cancel();
+  }
+
+  // Countdown beat (option): the next item blinks for about a second before you speak.
+  function beat() {
+    var row = $('plist').children[S.prompter.pointer];
+    if (!row) return;
+    var ms = S.opt.countdown_ms;
+    row.style.animationDuration = Math.round(ms / 3) + 'ms';
+    row.classList.remove('beat'); void row.offsetWidth; row.classList.add('beat');
+    setStatus('ready', 'Get ready…');
+    clearTimeout(S.beatTimer);
+    S.beatTimer = setTimeout(function () {
+      row.classList.remove('beat');
+      if (S.mode === 'record' && !S.paused && !S.hold && !S.playback) restoreStatus();
+    }, ms);
   }
 
   function logEvent(type, extra) {
@@ -251,7 +363,7 @@
     var thr = Detector.thresholdFor(S.floorDb, L);
     S.detector.setThreshold(thr, Detector.releaseFor(S.floorDb, thr));
     S.detector.setStartMs(Detector.startMsFor(L));
-    S.detector.setSilenceMs(S.list.silence_ms);
+    S.detector.setSilenceMs(Rules.silenceMs(S.list.list, S.prompter.current(), S.opt));
     var pct = Math.max(0, Math.min(100, (thr + 80) / 80 * 100));
     $('meter-thr').style.left = pct + '%';
     $('level-note').textContent = L === 0 ? 'Detection level ' + db1(thr) + ' dB'
@@ -265,6 +377,7 @@
     el.textContent = text;
   }
   function baseStatus() {
+    if (S.playback) return ['play', 'Playing back…'];
     if (S.paused) return ['pause', 'Paused'];
     if (S.hold) return ['hold', 'Recording (holding)…'];
     if (S.prompter && S.prompter.finished()) return ['got', 'All done: press Finish'];
@@ -298,7 +411,7 @@
       $('tocheck').classList.toggle('hidden', !tocheck || !!waiting);
       if (tocheck) {
         $('tocheck-text').textContent = tocheck.unchecked + ' file' + (tocheck.unchecked === 1 ? ' is' : 's are') + ' waiting for you to check (' + tocheck.title + ').';
-        $('btn-check-files').onclick = function () { S.list = S.list || { list: tocheck.id }; showReview(null); };
+        $('btn-check-files').onclick = function () { showReview(null, tocheck.id); };
       }
       if (waiting) {
         $('pending-text').textContent = waiting.pending + ' recorded item' + (waiting.pending === 1 ? ' is' : 's are') + ' waiting to be cut into files (' + waiting.title + ').';
@@ -315,6 +428,9 @@
         if (c.ready) b.addEventListener('click', function () { openList(c.id); });
         box.appendChild(b);
       });
+      var sel = $('tools-list'), keep = sel.value;
+      sel.innerHTML = r[1].lists.filter(function (c) { return c.ready; }).map(function (c) { return '<option value="' + c.id + '">' + esc(c.title) + '</option>'; }).join('');
+      if (keep) sel.value = keep;
     }).catch(function (e) {
       $('warn').classList.remove('hidden');
       $('warn').textContent = 'The studio is not answering (' + e.message + '). Is the Terminal window still running studio.py?';
@@ -329,7 +445,7 @@
     $('check-title').textContent = 'Starting the microphone…';
     $('check-result').textContent = '';
     $('check-bar').style.width = '0%';
-    $('mic-tip').textContent = (S.config && S.config.mic_tip) || '';
+    $('mic-tip').textContent = (S.opt && S.opt.mic_tip) || '';
     $('ns-check').checked = S.ns;
     return api('GET', '/api/list/' + name).then(function (data) {
       S.list = data;
@@ -337,6 +453,8 @@
       Object.keys(data.done || {}).forEach(function (k) { earlier[k] = { done: true }; });
       Object.keys(data.recorded || {}).forEach(function (k) { earlier[k] = data.recorded[k]; });
       S.prompter = new Prompter(data.items, earlier);
+      S.prompter.stayAfterRedo = S.opt.after_redo === 'stay';
+      S.autoTries = {};
       S.todayBase = {};
       (data.today || []).forEach(function (k) { S.todayBase[k] = true; });
       S.sessionItems = {}; S.events = [];
@@ -395,11 +513,15 @@
       S.sessionId = res.id;
       S.rec = 0; S.sent = 0; S.pcm = []; S.paused = false; S.hold = null; S.lastTake = null;
       S.offsetSamples = S.engine.delivered;
-      S.detector = new Detector({ sampleRate: S.sr, silenceMs: S.list.silence_ms });
+      S.detector = new Detector({ sampleRate: S.sr });
+      S.recent = []; S.playback = false; S.playSrc = null; S.autoTries = {};
       S.mode = 'record';
       S.saveOk = true;
       $('p-title').textContent = S.list.title;
       $('btn-pause').innerHTML = '<kbd>Space</kbd> Pause';
+      var sent = S.list.kind === 'sentences';          // sentences: Enter = Done, and the hold-to-record key is H
+      $('btn-done').classList.toggle('hidden', !sent);
+      $('btn-hold').innerHTML = '<kbd>' + (sent ? 'H' : 'Enter') + '</kbd> Hold to record';
       $('p-save').textContent = '';
       $('lasttake').textContent = '';
       applyLevel();
@@ -449,6 +571,7 @@
 
   function finish() {
     if (S.mode !== 'record') return;
+    endPlayback();
     if (S.hold) holdEnd();
     S.mode = 'idle';
     clearInterval(S.timer);
@@ -468,7 +591,7 @@
     $('busy').classList.remove('hidden');
     return api('POST', '/api/process', { list: listName, rebuild: !!rebuild }).then(function (rep) {
       $('busy').classList.add('hidden');
-      showReview(rep);
+      showReview(rep, listName);
     }).catch(function (e) {
       $('busy').classList.add('hidden');
       loadListScreen('Could not cut the files: ' + e.message + ' Your recordings are safe in the takes folder. Try "Cut and file them now".');
@@ -484,7 +607,8 @@
   function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
   function rowFor(rel) { return document.querySelector('.rv-row[data-f="' + rel + '"]'); }
 
-  function showReview(rep) {
+  function showReview(rep, listName) {
+    R.list = listName || (rep && rep.list) || (S.list && S.list.list) || 'sounds';
     show('review');
     window.scrollTo(0, 0);
     stopAll();
@@ -498,7 +622,7 @@
     }
     $('rv-problems').innerHTML = pr;
     $('rv-title').textContent = rep && rep.errors && rep.errors.length ? 'Check your files (some problems)' : 'Check your files';
-    return api('GET', '/api/review/' + ((S.list && S.list.list) || 'sounds')).then(function (r) {
+    return api('GET', '/api/review/' + R.list).then(function (r) {
       R.files = r.files; R.outDir = r.output_dir;
       R.files.forEach(function (f) { if (!f.review) R.sticky[f.file] = true; });
       var made = rep ? (rep.made || []).length : 0;
@@ -519,7 +643,8 @@
     var vis = visibleFiles(), h = '', last = null;
     vis.forEach(function (f) {
       if (f.no !== last) { if (last !== null) h += '</div>'; h += '<div class="rv-group"><h3>' + esc(f.title) + '</h3>'; last = f.no; }
-      var what = f.kind === 'sounds' ? ((f.keys || []).length > 1 ? 'both versions, 3 times each' : 'the sound × 3')
+      var what = f.kind === 'words' ? 'the word' : f.kind === 'sentences' ? 'the sentence'
+        : f.kind === 'sounds' ? ((f.keys || []).length > 1 ? 'both versions, 3 times each' : 'the sound × 3')
         : (f.version > 1 ? 'version 2 alone' : ((f.title || '').indexOf('(') > -1 ? 'version 1 alone' : 'the sound alone'));
       var meta = (f.seconds != null ? f.seconds.toFixed(2) + ' s' : '') + (f.rms_db != null ? ' · ' + db1(f.rms_db) + ' dB' + (f.limited_by_peak ? ' ▼' : '') : '') + (f.bytes ? ' · ' + kb(f.bytes) : '');
       h += '<div class="rv-row' + (f.review ? ' ' + f.review : '') + '" data-f="' + esc(f.file) + '">'
@@ -634,9 +759,11 @@
 
   // ── teleprompter list ───────────────────────────────────────────────────
   function rowHtml(it, i) {
-    var kw = it.versions > 1 ? '(as in <b>' + esc(it.key_word) + '</b>)' : esc(it.key_word);
+    var isText = it.text !== undefined;                 // words and sentences are shown as text; sounds as letters + key word
+    var big = isText ? esc(it.text) : esc(it.sound);
+    var kw = isText ? '' : (it.versions > 1 ? '(as in <b>' + esc(it.key_word) + '</b>)' : esc(it.key_word));
     return '<span class="num">' + (i + 1) + '</span>'
-      + '<span class="mid"><span class="big">' + esc(it.sound) + '</span><span class="kw">' + kw + '</span>'
+      + '<span class="mid"><span class="big">' + big + '</span><span class="kw">' + kw + '</span>'
       + '<span class="hint">' + esc(S.list.prompt) + '</span><span class="redo-tag">Redo: say it again</span></span>'
       + '<span class="chk">✓</span>';
   }
@@ -647,7 +774,7 @@
       box.innerHTML = '';
       P.items.forEach(function (it, i) {
         var d = document.createElement('div');
-        d.className = 'row'; d.dataset.i = i;
+        d.className = 'row ' + S.list.kind; d.dataset.i = i;
         d.innerHTML = rowHtml(it, i);
         d.addEventListener('click', function () { clickRow(i); });
         box.appendChild(d);
@@ -713,6 +840,7 @@
     return r ? r.value : 'one';
   }
   function moved(what, extra) {
+    endPlayback();
     logEvent(what, extra);
     if (S.detector) S.detector.cancel();
     applyLevel();
@@ -743,8 +871,16 @@
     moved('range', { from: a - 1, to: b - 1 });
   }
 
+  // "Done" (sentences): end the take now instead of waiting for the silence
+  function done() {
+    if (S.mode !== 'record' || S.paused || S.hold || S.playback || S.prompter.finished()) return;
+    var ev = S.detector.forceEnd();
+    if (ev) handleEnd(ev); else flashStatus('warn', 'Nothing heard yet');
+  }
+
   function pause() {
     if (S.mode !== 'record' || S.hold) return;
+    endPlayback();
     S.paused = !S.paused;
     if (S.detector) S.detector.cancel();
     logEvent(S.paused ? 'pause' : 'resume');
@@ -756,6 +892,8 @@
   // "Stop and retry": the sound was missed or cut. Drop what the detector has heard of this item and listen again, more sensitive.
   function retry() {
     if (S.mode !== 'record' || S.paused || S.hold || S.prompter.finished()) return;
+    endPlayback();
+    delete S.autoTries[S.prompter.current().key];
     S.detector.cancel();
     var L = S.prompter.retry();
     logEvent('retry', { key: S.prompter.current().key, level: L });
@@ -767,6 +905,7 @@
   // Hold-to-record fallback: while the key/button is held, the take is forced; no detection needed.
   function holdStart() {
     if (S.mode !== 'record' || S.paused || S.hold || S.prompter.finished()) return;
+    endPlayback();
     S.hold = { start: recTime() };
     S.detector.cancel();
     $('btn-hold').classList.add('down');
@@ -786,6 +925,7 @@
       if (S.hold) return;
       S.ns = on;
       updateNs();
+      saveOptions({ noise_suppression: on }).catch(function () {});
       logEvent('noise_suppression', { on: on });
       S.detector.cancel();
       $('overlay').classList.remove('hidden');
@@ -800,25 +940,272 @@
       }).then(function () { $('overlay').classList.add('hidden'); restoreStatus(); });
     } else {
       S.ns = on;                                    // on the quiet check screen: re-open the mic and measure again
+      saveOptions({ noise_suppression: on }).catch(function () {});
       $('ns-check').checked = on;
       runCheck();
     }
   }
 
+  // ── Options menu (the gear) ─────────────────────────────────────────────
+  var OPT_SECTIONS = [
+    { title: 'Recording', fields: [
+      { k: 'noise_suppression', t: 'bool', label: 'Noise suppression', help: 'It can clip faint consonants like f and th. Use "Test the mic" below to decide by ear.' },
+      { k: 'mode', t: 'enum', label: 'Mode', choices: [['quick', 'Quick: record many in a row, check later'], ['careful', 'Careful: play each take back right after it is found']] },
+      { k: 'after_redo', t: 'enum', label: 'After redoing an old item', choices: [['return', 'Return to where I was'], ['stay', 'Stay on the redone item']] },
+      { k: 'countdown', t: 'bool', label: 'Countdown beat', help: 'The next item blinks before you speak.' },
+      { k: 'countdown_ms', t: 'num', label: 'Countdown length', unit: 'ms', step: 100 }
+    ] },
+    { title: 'Auto-redo', fields: [
+      { k: 'auto_redo', t: 'bool', label: 'Auto-redo', help: 'If a take looks bad, it is not marked done: the item turns amber and asks you to say it again.' },
+      { k: 'auto_redo_min_ms', t: 'num', label: 'Too short if under', unit: 'ms', step: 10 },
+      { k: 'auto_redo_max_ms_sounds', t: 'num', label: 'Too long for a sound if over', unit: 'ms', step: 100 },
+      { k: 'auto_redo_max_ms_words', t: 'num', label: 'Too long for a word if over', unit: 'ms', step: 100 },
+      { k: 'auto_redo_max_ms_sentences', t: 'num', label: 'Too long for a sentence if over', unit: 'ms', step: 500 },
+      { k: 'auto_redo_min_rms_db', t: 'num', label: 'Too quiet if under', unit: 'dB', step: 1, help: 'The loudness of the take itself. Normal speech is around −35 to −20.' },
+      { k: 'auto_redo_clip_db', t: 'num', label: 'Clipping if the peak is over', unit: 'dB', step: 0.1 },
+      { k: 'auto_redo_max_tries', t: 'num', label: 'Ask at most', unit: 'times per item', step: 1, help: 'After that the take is kept anyway (with a warning), so you are never stuck.' }
+    ] },
+    { title: 'Listening', fields: [
+      { k: 'silence_ms_sounds', t: 'num', label: 'Silence that ends a sound', unit: 'ms', step: 50 },
+      { k: 'silence_ms_words', t: 'num', label: 'Silence that ends a word', unit: 'ms', step: 50 },
+      { k: 'silence_ms_sentences', t: 'autonum', label: 'Silence that ends a sentence', unit: 'ms', step: 100, help: 'Auto: longer sentences wait a little longer (settings below).' },
+      { k: 'sentence_silence_base_ms', t: 'num', label: 'Auto: silence for a short sentence', unit: 'ms', step: 100 },
+      { k: 'sentence_short_words', t: 'num', label: 'Auto: a short sentence has up to', unit: 'words', step: 1 },
+      { k: 'sentence_silence_per_word_ms', t: 'num', label: 'Auto: extra for each word above that', unit: 'ms', step: 10 },
+      { k: 'sentence_silence_max_ms', t: 'num', label: 'Auto: never more than', unit: 'ms', step: 100 },
+      { k: 'sensitivity_margin_db', t: 'num', label: 'Detection level above the room noise', unit: 'dB', step: 1, help: 'Lower = more sensitive (picks up softer sounds, but also noise).' },
+      { k: 'retry_step_db', t: 'num', label: 'Each Stop & retry lowers the level by', unit: 'dB', step: 0.5 }
+    ] },
+    { title: 'Files (for sounds you make from now on; press "Rebuild all files" on the lists screen to redo old ones)', fields: [
+      { k: 'pad_s', t: 'num', label: 'Quiet kept each side of a sound', unit: 's', step: 0.01 },
+      { k: 'fade_ms', t: 'num', label: 'Fade in and out', unit: 'ms', step: 1 },
+      { k: 'target_rms_db', t: 'num', label: 'Loudness of each sound (RMS)', unit: 'dB', step: 1, help: 'Higher = louder. The loudest peak still never goes over the limit below.' },
+      { k: 'peak_db', t: 'num', label: 'Loudest peak', unit: 'dB', step: 0.1 },
+      { k: 'aac_kbps', t: 'select', label: 'Quality (.m4a bitrate)', choices: [[64, '64 kbps (default)'], [96, '96 kbps'], [128, '128 kbps'], [160, '160 kbps'], [192, '192 kbps']], help: 'Try 96 or 128 if short sounds like k and t sound rough.' },
+      { k: 'sound_repeats', t: 'enum', label: 'Sound said', choices: [[3, '3 times (you record it once)'], [1, 'once']] },
+      { k: 'sound_gap_s', t: 'num', label: 'Quiet between repeats', unit: 's', step: 0.1 },
+      { k: 'version_pause_s', t: 'num', label: 'Quiet between the two versions (th, ew…)', unit: 's', step: 0.1 }
+    ] },
+    { title: 'Microphone reminder', fields: [
+      { k: 'mic_tip', t: 'text', label: 'Shown on the quiet-check screen' }
+    ] }
+  ];
+  var optGet = {}, optSet = {};
+
+  function el(tag, cls, html) { var e = document.createElement(tag); if (cls) e.className = cls; if (html !== undefined) e.innerHTML = html; return e; }
+
+  function buildOptForm() {
+    var form = $('opt-form');
+    form.innerHTML = '';
+    optGet = {}; optSet = {};
+    OPT_SECTIONS.forEach(function (sec) {
+      form.appendChild(el('h3', '', esc(sec.title)));
+      sec.fields.forEach(function (f) {
+        var sp = S.spec[f.k], v = S.opt[f.k];
+        var row = el('div', 'of'), ctl = el('div', 'ctl');
+        row.appendChild(el('div', 'lbl', esc(f.label)));
+        if (f.t === 'bool') {
+          var cb = el('input'); cb.type = 'checkbox'; cb.checked = !!v;
+          var l = el('label'); l.appendChild(cb); l.appendChild(el('span', '', 'On'));
+          ctl.appendChild(l);
+          optGet[f.k] = function () { return cb.checked; }; optSet[f.k] = function (x) { cb.checked = !!x; };
+        } else if (f.t === 'enum') {
+          f.choices.forEach(function (c) {
+            var rb = el('input'); rb.type = 'radio'; rb.name = 'opt-' + f.k; rb.value = String(c[0]); rb.checked = String(c[0]) === String(v);
+            var l = el('label'); l.appendChild(rb); l.appendChild(el('span', '', esc(c[1])));
+            ctl.appendChild(l);
+          });
+          optGet[f.k] = function () {
+            var r = ctl.querySelector('input:checked');
+            var c = r && f.choices.filter(function (c) { return String(c[0]) === r.value; })[0];
+            return c ? c[0] : undefined;
+          };
+        } else if (f.t === 'select') {
+          var sel = el('select');
+          f.choices.forEach(function (c) { var o = el('option', '', esc(c[1])); o.value = String(c[0]); if (String(c[0]) === String(v)) o.selected = true; sel.appendChild(o); });
+          ctl.appendChild(sel);
+          optGet[f.k] = function () { var c = f.choices.filter(function (c) { return String(c[0]) === sel.value; })[0]; return c ? c[0] : undefined; };
+        } else if (f.t === 'num' || f.t === 'autonum') {
+          var inp = el('input'); inp.type = 'number'; inp.min = sp.min; inp.max = sp.max; inp.step = f.step || 1;
+          var line = el('div');
+          var auto = null;
+          if (f.t === 'autonum') {
+            auto = el('input'); auto.type = 'checkbox'; auto.checked = v === 'auto';
+            var al = el('label'); al.appendChild(auto); al.appendChild(el('span', '', 'Auto'));
+            ctl.appendChild(al);
+            inp.value = v === 'auto' ? 2000 : v;
+            inp.disabled = v === 'auto';
+            auto.addEventListener('change', function () { inp.disabled = auto.checked; });
+          } else inp.value = v;
+          line.appendChild(inp); line.appendChild(el('span', 'unit', esc(f.unit || '')));
+          ctl.appendChild(line);
+          optGet[f.k] = function () {
+            if (auto && auto.checked) return 'auto';
+            var n = Number(inp.value);
+            return inp.value === '' || !isFinite(n) ? undefined : n;
+          };
+        } else if (f.t === 'text') {
+          var ta = el('textarea'); ta.value = v; ta.maxLength = sp.max;
+          row.appendChild(ta);
+          optGet[f.k] = function () { return ta.value; };
+        }
+        if (f.t !== 'text') row.appendChild(ctl);
+        if (f.help) row.appendChild(el('div', 'help', esc(f.help)));
+        form.appendChild(row);
+        if (f.k === 'noise_suppression') {
+          var b = el('button', 'btn small', 'Test the mic (3 seconds, with and without)');
+          b.type = 'button'; b.id = 'btn-mt'; b.addEventListener('click', micTest);
+          var wrap = el('div', 'of'); wrap.appendChild(b);
+          wrap.appendChild(el('div', 'help', S.mode === 'record' ? 'Open Options from the lists screen to test the mic.' : 'You say the same thing twice, then listen to both and choose.'));
+          form.appendChild(wrap);
+          b.disabled = S.mode === 'record';
+        }
+      });
+    });
+  }
+
+  function optMsg(text, isErr) { var m = $('opt-msg'); m.textContent = text; m.className = 'small' + (isErr ? ' err' : ''); }
+  function optOpen() {
+    if (!S.opt) return;
+    optMsg('');
+    buildOptForm();
+    $('mt').classList.add('hidden');
+    $('opt').classList.remove('hidden');
+  }
+  function optClose() { stopMt(); $('opt').classList.add('hidden'); }
+
+  function optSave() {
+    var vals = {};
+    OPT_SECTIONS.forEach(function (sec) {
+      sec.fields.forEach(function (f) {
+        var nv = optGet[f.k] && optGet[f.k]();
+        if (nv !== undefined && nv !== S.opt[f.k]) vals[f.k] = nv;
+      });
+    });
+    if (!Object.keys(vals).length) { optClose(); return; }
+    saveOptions(vals).then(function () {
+      optMsg('Saved ✓');
+      if ('noise_suppression' in vals) {
+        if (S.mode === 'record' || S.screen === 'check') toggleNs(S.opt.noise_suppression);
+        else S.ns = S.opt.noise_suppression;
+        updateNs();
+        $('ns-check').checked = S.ns;
+      }
+      setTimeout(optClose, 450);
+    }).catch(function (e) { optMsg(e.message, true); });
+  }
+
+  function optReset() {
+    if (!confirm('Put ALL options back to the defaults?')) return;
+    api('POST', '/api/settings', { reset: true }).then(function (r) {
+      S.spec = r.spec; applyOptions(r.values);
+      buildOptForm();
+      optMsg('Back to the defaults ✓');
+    }).catch(function (e) { optMsg(e.message, true); });
+  }
+
+  // ── Test the mic: record 3 s with noise suppression ON, then 3 s OFF, then play both ────────────
+  var MT = { run: 0, play: null };
+  function stopMt() {
+    MT.run++;
+    if (MT.play) { try { MT.play.stop(); } catch (e) {} MT.play = null; }
+    if (S.engine && S.mode === 'idle') { S.engine.onblock = onBlock; if (!TEST.audio) S.engine.release(); }
+  }
+  function mtStats(x, sr) {
+    var hop = Math.round(sr * 0.01), d = [], pk = 0;
+    for (var i = 0; i + hop <= x.length; i += hop) {
+      var s = 0;
+      for (var j = i; j < i + hop; j++) { s += x[j] * x[j]; var a = Math.abs(x[j]); if (a > pk) pk = a; }
+      d.push(10 * Math.log10(s / hop + 1e-12));
+    }
+    d.sort(function (a, b) { return a - b; });
+    var q = function (p) { return d.length ? d[Math.floor(p * (d.length - 1))] : -120; };
+    return { peak: pk > 0 ? 20 * Math.log10(pk) : -120, back: q(0.2), voice: q(0.95) };
+  }
+
+  function micTest() {
+    if (S.mode === 'record') return;
+    var E = ensureEngine(), my = ++MT.run, sr;
+    $('mt').classList.remove('hidden');
+    $('mt-results').innerHTML = '';
+    $('mt-bar').style.width = '0%';
+    var say = function (title, text) { $('mt-title').textContent = title; $('mt-text').textContent = text || ''; };
+    function capture(ns) {
+      var open = TEST.audio ? (E.testStarted ? Promise.resolve() : E.openTest(TEST.audio)) : E.openMic(S.deviceId, ns);
+      return open.then(function () { sr = E.ctx.sampleRate; S.sr = sr; return wait(700); }).then(function () {
+        return new Promise(function (resolve) {
+          var chunks = [], n = 0, need = Math.round(3 * sr);
+          say('Speak now (noise suppression ' + (ns ? 'ON' : 'OFF') + ')', 'Say the same thing both times, for example: "sh… f… k… s… th…"');
+          E.onblock = function (x) {
+            meter(x);
+            if (MT.run !== my) return;
+            chunks.push(new Float32Array(x)); n += x.length;
+            $('mt-bar').style.width = Math.min(100, Math.round(100 * n / need)) + '%';
+            if (n >= need) {
+              E.onblock = function (y) { meter(y); };
+              var all = new Float32Array(need), o = 0;
+              chunks.forEach(function (c) { var m = Math.min(c.length, need - o); all.set(c.subarray(0, m), o); o += m; });
+              resolve(all);
+            }
+          };
+        });
+      });
+    }
+    say('Test the mic', 'Starting the microphone…');
+    capture(true).then(function (on) {
+      if (MT.run !== my) return;
+      $('mt-bar').style.width = '0%';
+      return capture(false).then(function (off) { return { on: on, off: off }; });
+    }).then(function (r) {
+      if (!r || MT.run !== my) return;
+      if (!TEST.audio) E.release();
+      say('Listen to both', 'Which one sounds better: clearer consonants, no clipped starts? Then press "Use" under it and Save.');
+      var res = $('mt-results');
+      res.innerHTML = '';
+      [['on', 'With noise suppression', true], ['off', 'Without noise suppression', false]].forEach(function (d) {
+        var st = mtStats(r[d[0]], sr);
+        var row = el('div', 'mt-row');
+        var pb = el('button', 'btn small', '▶ ' + d[1]); pb.type = 'button';
+        pb.addEventListener('click', function () {
+          if (MT.play) { try { MT.play.stop(); } catch (e) {} MT.play = null; }
+          var buf = E.ctx.createBuffer(1, r[d[0]].length, sr); buf.copyToChannel(r[d[0]], 0);
+          var src = E.ctx.createBufferSource(); src.buffer = buf; src.connect(E.ctx.destination); MT.play = src; src.start();
+        });
+        var use = el('button', 'btn small', 'Use ' + (d[2] ? 'noise suppression' : 'no noise suppression')); use.type = 'button';
+        use.addEventListener('click', function () { optSet.noise_suppression(d[2]); optMsg('Now press Save to keep it.'); });
+        row.appendChild(pb);
+        row.appendChild(el('span', 'meta', 'Voice ' + db1(st.voice) + ' dB · background ' + db1(st.back) + ' dB · peak ' + db1(st.peak) + ' dB'));
+        row.appendChild(use);
+        res.appendChild(row);
+      });
+    }).catch(function (err) {
+      say('Cannot test', friendlyMicError(err));
+    });
+  }
+
   // ── wiring ──────────────────────────────────────────────────────────────
   function wire() {
+    function toolsList() { var sel = $('tools-list'); return { id: sel.value, title: sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : sel.value }; }
     function startOver(everything) {
+      var L = toolsList();
+      if (!L.id) return;
       var msg = everything
-        ? 'Start the Sounds list over COMPLETELY?\n\nThe finished files, the lossless cuts, the progress and your unfinished takes are all moved aside (into takes/_old). Nothing is deleted.'
-        : 'Start the Sounds list over?\n\nYour recordings that are not cut into files yet are moved aside (into takes/_old). Nothing is deleted.';
+        ? 'Start "' + L.title + '" over COMPLETELY?\n\nIts finished files, lossless cuts, progress and unfinished takes are all moved aside (into takes/_old). Nothing is deleted.'
+        : 'Start "' + L.title + '" over?\n\nRecordings that are not cut into files yet are moved aside (into takes/_old). Nothing is deleted.';
       if (!confirm(msg)) return;
-      api('POST', '/api/reset', { list: 'sounds', everything: everything }).then(function (r) {
+      api('POST', '/api/reset', { list: L.id, everything: everything }).then(function (r) {
         loadListScreen(r.folder ? 'Started over. Moved aside to ' + r.folder : 'Nothing to move.');
       }).catch(function (e) { $('msg-list').textContent = e.message; });
     }
     $('btn-reset').addEventListener('click', function () { startOver(false); });
     $('btn-reset-all').addEventListener('click', function () { startOver(true); });
-    $('btn-rebuild').addEventListener('click', function () { runProcess('sounds', true); });
+    $('btn-rebuild').addEventListener('click', function () { var L = toolsList(); if (L.id) runProcess(L.id, true); });
+    ['btn-gear-list', 'btn-gear-check', 'btn-gear'].forEach(function (id) { $(id).addEventListener('click', function () { optOpen(); this.blur(); }); });
+    $('opt-x').addEventListener('click', optClose);
+    $('opt-cancel').addEventListener('click', optClose);
+    $('opt-save').addEventListener('click', optSave);
+    $('opt-reset').addEventListener('click', optReset);
+    $('btn-done').addEventListener('click', function () { done(); this.blur(); });
     $('btn-rv-back').addEventListener('click', function () { stopAll(); loadListScreen(); });
     $('rv-files').addEventListener('click', reviewClick);
     $('btn-playall').addEventListener('click', playAll);
@@ -851,19 +1238,25 @@
 
     document.addEventListener('keydown', function (e) {
       if (S.screen !== 'prompt' || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (!$('opt').classList.contains('hidden')) return;            // the Options menu is open
       var t = e.target && e.target.tagName;
       if (t === 'INPUT' && e.target.type !== 'radio' && e.target.type !== 'checkbox') return;
       if (t === 'SELECT' || t === 'TEXTAREA') return;
-      var k = e.key;
-      if (k === ' ' || k === 'ArrowLeft' || k === 'ArrowRight' || k === 'Enter' || k === 'r' || k === 'R') e.preventDefault(); else return;
+      var k = e.key, lk = k.length === 1 ? k.toLowerCase() : k, sent = S.list && S.list.kind === 'sentences';
+      if (k === ' ' || k === 'ArrowLeft' || k === 'ArrowRight' || k === 'Enter' || lk === 'r' || (sent && lk === 'h')) e.preventDefault(); else return;
       if (e.repeat) return;
       if (k === ' ') pause();
       else if (k === 'ArrowLeft') redo();
       else if (k === 'ArrowRight') skip();
-      else if (k === 'Enter') holdStart();
+      else if (k === 'Enter') { if (sent) done(); else holdStart(); }      // sentences: Enter = Done, hold H to record
+      else if (lk === 'h') holdStart();
       else retry();
     });
-    document.addEventListener('keyup', function (e) { if (e.key === 'Enter' && S.screen === 'prompt') holdEnd(); });
+    document.addEventListener('keyup', function (e) {
+      if (S.screen !== 'prompt') return;
+      var sent = S.list && S.list.kind === 'sentences';
+      if (sent ? (e.key === 'h' || e.key === 'H') : e.key === 'Enter') holdEnd();
+    });
     window.addEventListener('blur', function () { if (S.hold) holdEnd(); });
     document.addEventListener('visibilitychange', function () { if (document.hidden && S.mode === 'record') flush(); });
     window.addEventListener('beforeunload', function (e) {
@@ -875,8 +1268,11 @@
     try { S.deviceId = localStorage.getItem('studio.mic') || null; } catch (e) {}
     wire();
     requestAnimationFrame(drawMeter);
-    window.__studio = { S: S, flush: flush, runProcess: runProcess, showReview: showReview, R: R, player: player, clickRow: clickRow, redo: redo, skip: skip, retry: retry, pause: pause, finish: finish, holdStart: holdStart, holdEnd: holdEnd };
-    loadListScreen().then(function () { if (TEST.list) openList(TEST.list); });
+    window.__studio = { S: S, done: done, optOpen: optOpen, micTest: micTest, flush: flush, runProcess: runProcess, showReview: showReview, R: R, player: player, clickRow: clickRow, redo: redo, skip: skip, retry: retry, pause: pause, finish: finish, holdStart: holdStart, holdEnd: holdEnd };
+    loadOptions().then(loadListScreen).then(function () { if (TEST.list) openList(TEST.list); }).catch(function (e) {
+      $('warn').classList.remove('hidden');
+      $('warn').textContent = 'The studio is not answering (' + e.message + '). Is the Terminal window still running studio.py?';
+    });
   }
   init();
 })();

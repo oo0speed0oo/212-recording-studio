@@ -11,7 +11,7 @@
 <!-- 1. Pick a list -->
 <section id="s-list" class="screen">
   <div class="wrap">
-    <h1>212 Recording Studio</h1>
+    <div class="title-row"><h1>212 Recording Studio</h1><button id="btn-gear-list" class="btn small" type="button">⚙ Options</button></div>
     <p class="sub">Pick a list and read it out loud. The program cuts your recording up and names every file for you.</p>
     <div id="warn" class="warn hidden"></div>
     <div id="pending" class="notice hidden">
@@ -25,11 +25,12 @@
     <div id="cards" class="cards"></div>
     <p id="msg-list" class="note"></p>
     <div class="tiny tools">
-      <div><button id="btn-rebuild" class="link" type="button">Rebuild all Sounds files</button>
+      <div>Tools for <select id="tools-list"></select>:</div>
+      <div><button id="btn-rebuild" class="link" type="button">Rebuild all files</button>
         with the current settings (loudness, bitrate, gaps). No re-recording needed.</div>
-      <div><button id="btn-reset" class="link" type="button">Start Sounds over</button>
+      <div><button id="btn-reset" class="link" type="button">Start over</button>
         Moves recordings that are not cut into files yet to <code>takes/_old</code>.</div>
-      <div><button id="btn-reset-all" class="link" type="button">Start Sounds over completely</button>
+      <div><button id="btn-reset-all" class="link" type="button">Start over completely</button>
         Also moves the finished files, cuts and progress to <code>takes/_old</code>. Nothing is deleted.</div>
     </div>
   </div>
@@ -38,7 +39,7 @@
 <!-- 2. Quiet check -->
 <section id="s-check" class="screen hidden">
   <div class="wrap narrow">
-    <button id="btn-check-back" class="link" type="button">← Lists</button>
+    <div class="title-row"><button id="btn-check-back" class="link" type="button">← Lists</button><button id="btn-gear-check" class="btn small" type="button">⚙ Options</button></div>
     <h2>Quiet check</h2>
     <div class="mic-row">
       <label>Microphone
@@ -69,6 +70,7 @@
     <div class="tb-mid"><span id="p-today" class="chip"></span></div>
     <div class="tb-right">
       <span id="p-save" class="muted small"></span>
+      <button id="btn-gear" class="btn small" type="button" title="Options">⚙</button>
       <button id="btn-ns" class="btn small" type="button">Noise suppression: on</button>
       <button id="btn-finish" class="btn small primary" type="button">Finish</button>
     </div>
@@ -93,6 +95,7 @@
       <button id="btn-skip" class="btn" type="button">Skip <kbd>→</kbd></button>
       <button id="btn-pause" class="btn" type="button"><kbd>Space</kbd> Pause</button>
       <button id="btn-retry" class="btn" type="button" title="The sound was missed or cut? Listen again, more sensitive."><kbd>R</kbd> Stop &amp; retry</button>
+      <button id="btn-done" class="btn done hidden" type="button"><kbd>Enter</kbd> Done</button>
       <button id="btn-hold" class="btn hold" type="button"><kbd>Enter</kbd> Hold to record</button>
     </div>
 
@@ -135,6 +138,26 @@
   </div>
 </div>
 
+<!-- Options menu -->
+<div id="opt" class="overlay hidden">
+  <div class="opt-box" role="dialog" aria-label="Options">
+    <div class="opt-head"><h2>Options</h2><button id="opt-x" class="btn small" type="button">✕</button></div>
+    <div id="opt-form" class="opt-form"></div>
+    <div id="mt" class="mt hidden">
+      <div id="mt-title" class="check-title">Test the mic</div>
+      <div class="bar"><i id="mt-bar"></i></div>
+      <div id="mt-text" class="muted small"></div>
+      <div id="mt-results"></div>
+    </div>
+    <div class="opt-foot">
+      <button id="opt-reset" class="link" type="button">Put all options back to the defaults</button>
+      <span id="opt-msg" class="small"></span>
+      <button id="opt-cancel" class="btn" type="button">Cancel</button>
+      <button id="opt-save" class="btn primary" type="button">Save</button>
+    </div>
+  </div>
+</div>
+
 <div id="overlay" class="overlay hidden">
   <div class="overlay-box">
     <div id="overlay-title" class="check-title">Stay quiet…</div>
@@ -145,6 +168,7 @@
 
 <script src="detector.js"></script>
 <script src="prompter.js"></script>
+<script src="rules.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

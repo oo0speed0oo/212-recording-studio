@@ -117,6 +117,29 @@ def make_flow():
     t.save("flow", {"lead_in_seconds": 5.0})
 
 
+def make_autoredo():
+    """For the auto-redo browser test: three clipped takes in a row for the first item (the 3rd is kept after 2 asks),
+    then a good one, then a 3.5 s one (too long for a sound), then a good one."""
+    rng = np.random.default_rng(4)
+    t = Track(rng, 26.0)
+    for start in (6.0, 8.0, 10.0):
+        t.put(start, np.clip(tone(0.4, 300, -3) * 3, -1, 1), "clipped", "clip")
+    t.put(12.0, tone(0.4, 330, -25), "good", "tone")
+    t.put(14.0, tone(3.5, 250, -25), "too long for a sound", "long")
+    t.put(20.0, tone(0.4, 360, -25), "good", "tone")
+    t.save("autoredo")
+
+
+def make_sentence():
+    """For the sentences browser test: two sentences, each with a 0.7 s pause in the middle."""
+    rng = np.random.default_rng(5)
+    t = Track(rng, 24.0)
+    sig = np.concatenate([tone(0.5, 300, -25), np.zeros(int(SR * 0.7)), tone(0.5, 400, -25)])
+    t.put(6.0, sig, "sentence 1", "sentence")
+    t.put(12.0, sig, "sentence 2", "sentence")
+    t.save("sentence")
+
+
 def make_quiet():
     """60 s of room noise only: lets the browser test try the buttons (hold-to-record, pause...) with nothing to detect."""
     rng = np.random.default_rng(1212)
@@ -126,4 +149,6 @@ def make_quiet():
 if __name__ == "__main__":
     make_synthetic()
     make_flow()
+    make_autoredo()
+    make_sentence()
     make_quiet()

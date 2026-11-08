@@ -1,13 +1,3 @@
 {
-  "website_folder": "~/Documents/212english-website",
-  "mic_tip": "Same distance from the microphone every time (about a fist away), and the same gain setting on the mic. Speak across it, not straight into it.",
-
-  "pad_s": 0.12,
-  "fade_ms": 10,
-  "target_rms_db": -20,
-  "peak_db": -1,
-  "aac_kbps": 64,
-  "sound_repeats": 3,
-  "sound_gap_s": 0.6,
-  "version_pause_s": 1.0
+  "website_folder": "~/Documents/212english-website"
 }

@@ -6,9 +6,9 @@ You read from a scrolling teleprompter into one long recording. The program find
 and (from step R2) cuts the recording up, names every file the way the website needs it,
 and puts the files in the right folders. No file work for you.
 
-**Status: step R3.** The Sounds teleprompter records you, **Finish** cuts every sound out, evens out the loudness,
-names the files the way the website needs them and saves them, and the **check screen** lets you play every new file and
-press OK or Redo.
+**Status: step R4.** Four lists (Sounds, Challenge words, Sentences, Common words). The teleprompter records you, **Finish** cuts
+everything out, evens out the loudness, names the files the way the website needs them and saves them, and the **check screen**
+lets you play every new file and press OK or Redo. The **⚙ Options** menu changes how it all behaves.
 
 ## Start it
 
@@ -23,7 +23,8 @@ To stop: press Ctrl+C in that window. Mac only for now. Chrome or Safari both wo
 
 ## How a session goes
 
-1. **Pick a list** (only *Sounds* works so far).
+1. **Pick a list.** *Sounds* (75 items: 67 sounds, 8 with two versions), *Challenge words* (rare words and names, in lesson order),
+   *Sentences* (in id order) and *Common words* (do these last). Each card shows how many are done.
 2. **Quiet check** (2 seconds): stay quiet. The program measures the room and sets the detection level.
    Pick your microphone here (the Blue one) and check the volume bar moves when you speak.
 3. **Teleprompter:** the current sound is big in the blue band. Say it **once**. When you stop speaking
@@ -36,6 +37,7 @@ To stop: press Ctrl+C in that window. Mac only for now. Chrome or Safari both wo
 | Space | Pause | stop listening and stop the recording clock |
 | R | Stop & retry | the sound was missed: listen again, more sensitive (3 steps, each also shortens the "must last" time) |
 | hold Enter | Hold to record | fallback: while you hold it, the take is forced. No detection needed |
+| Enter (sentences) | Done | **Sentences only:** ends the take right now, so you do not wait for the silence. Hold-to-record is the **H** key there |
 | click a row | | go to that item and redo it. By default you return to where you were after one take |
 
 Under the list: choose what a click on a finished item does: **Only this one**, **From here** (carries on forward and
@@ -101,22 +103,51 @@ Use it after changing the loudness, bitrate or gaps below. No re-recording.
 **Start Sounds over** moves recordings that are not cut yet to `takes/_old/`. **Start Sounds over completely** also moves the finished
 files, the cuts and the progress there. Nothing is ever deleted.
 
-## Settings
+## Options (the ⚙ button)
 
-Copy `settings.example.json` to `settings.json` to change anything (then press **Rebuild** to apply it to files you already made):
+Everything below can be changed in the **⚙ Options** menu (lists screen, quiet-check screen, or while recording) and is saved in
+`settings.json`. Nothing to type by hand. **Put all options back to the defaults** is at the bottom.
 
-| Setting | Default | What it does |
-|---|---|---|
-| `website_folder` | `~/Documents/212english-website` | where the CSV lists are. The studio only **reads** there |
-| `mic_tip` | (a reminder) | the text on the quiet-check screen |
-| `pad_s` | 0.12 | quiet kept before and after each sound |
-| `fade_ms` | 10 | fade in and out |
-| `target_rms_db` | −20 | loudness of the sound (higher = louder, up to −6) |
-| `peak_db` | −1 | the loudest sample never goes above this |
-| `aac_kbps` | 64 | quality. Try 96 or 128 if short sounds like /k/ and /t/ sound rough |
-| `sound_repeats` | 3 | times the sound is said in `sounds/<no>.m4a` |
-| `sound_gap_s` | 0.6 | quiet you hear between repeats |
-| `version_pause_s` | 1.0 | quiet you hear between version 1 and version 2 |
+**Recording**
+* **Noise suppression** (on). It can clip faint consonants. **Test the mic** (lists screen): you say the same thing twice for 3 seconds,
+  once with noise suppression on and once off; play both and press "Use" under the better one.
+* **Mode:** *Quick* (default): record many in a row and check later. *Careful*: each take is played back right after it is found
+  (the recording pauses while it plays, so the playback is never recorded). Press ← if you did not like it.
+* **After redoing an old item:** return to where you were (default), or stay on the redone item.
+* **Countdown beat** (off): the next item blinks for about a second before you speak.
+
+**Auto-redo** (on). After each take, if it looks bad it is **not** marked done: the item turns amber and asks you to say it again.
+"Bad" means too short (under 60 ms), too long (sounds and words over 3 s, sentences over 12 s), too quiet (under −50 dB) or clipping
+(peak over −0.3 dB). All five numbers are options. It asks at most twice per item; the third take is kept with a warning so you are never stuck.
+Hold-to-record takes are never judged.
+
+**Listening**
+* Silence that ends a take: sounds 500 ms, words 700 ms, sentences **auto**: 1000 ms for short ones, +80 ms for every word above 6, never
+  more than 2000 ms. Or give sentences one fixed number.
+* **Detection level** above the room noise (12 dB) and how much each **Stop & retry** lowers it (3 dB).
+
+**Files** (apply to files you make from now on; press **Rebuild all files** on the lists screen to redo old ones)
+* Quiet kept each side `pad_s` 0.12 s, `fade_ms` 10, loudness `target_rms_db` −20, loudest peak `peak_db` −1.
+* Quality `aac_kbps` 64 (try 96 or 128 if short sounds like /k/ and /t/ sound rough).
+* Sound said `sound_repeats` 3 times, `sound_gap_s` 0.6 between repeats, `version_pause_s` 1.0 between version 1 and 2.
+
+**Microphone reminder:** the text on the quiet-check screen.
+
+Only options that differ from the default are written to `settings.json`. The one other thing in that file is `website_folder`
+(default `~/Documents/212english-website`, where the CSV lists are read from; the studio only **reads** there). See `settings.example.json`.
+
+## The lists and their files
+
+| List | Items | You see | Files (in `output/phonics/`) |
+|---|---|---|---|
+| Sounds | 75 | the letters big, the key word small | `alone/<no>.m4a`, `alone/<no>-2.m4a`, `sounds/<no>.m4a` (see above) |
+| Challenge words | 317 | the word big | `words/<word>.m4a` |
+| Sentences | 213 | the sentence | `sentences/<id>.m4a` (for example `sentences/PS1.m4a`) |
+| Common words | 825 | the word big | `words/<word>.m4a` |
+
+Words and sentences are cut, levelled and named like sounds (one file each, no repeats). Progress follows the item key
+(`word:cad`, `sentence:PS1`, `sound:23:v2`), never the list position, so changing a CSV later breaks nothing.
+**Start over** and **Rebuild** (lists screen, "Tools for …") work per list, so redoing Challenge words never touches Common words.
 
 ## Folders
 
@@ -136,6 +167,6 @@ Nothing in this repo ever touches the live website.
 tests/run_tests.sh
 ```
 
-Makes synthetic audio (tones and hiss with silences), runs the voice detector, the Redo/Skip logic, the server and the whole
-cut-clean-encode step on it (decoding the `.m4a` files back to check lengths, gaps, loudness and bitrate), and says ALL TESTS PASSED. To watch the whole screen run on test audio instead of a microphone, start the studio
+Makes synthetic audio (tones and hiss with silences), runs the voice detector, the Redo/Skip logic, the option rules, the server and the whole
+cut-clean-encode step for all four lists on it (decoding the `.m4a` files back to check lengths, gaps, loudness and bitrate), and says ALL TESTS PASSED. To watch the whole screen run on test audio instead of a microphone, start the studio
 and open `http://localhost:8212/?testaudio=flow.wav&list=sounds&autostart=1` after running the tests once.

@@ -111,6 +111,18 @@ ok(!d.inTake(), 'cancel() ends the take in progress');
 ev = d.push(new Float32Array(wav.sr));
 ok(ev.length === 0, 'after cancel(), silence gives no "end" event');
 
+// Done button: forceEnd() ends the take now, with the end where the sound really ended
+var d2 = new Detector({ sampleRate: wav.sr, thresholdDb: -45, silenceMs: 1500 });
+var burst = new Float32Array(Math.round(0.6 * wav.sr));
+for (i = 0; i < burst.length; i++) burst[i] = 0.1 * Math.sin(i * 0.1);
+ok(d2.forceEnd() === null, 'forceEnd() with nothing heard returns null');
+d2.push(burst);
+d2.push(new Float32Array(Math.round(0.3 * wav.sr)));           // 0.3 s of silence: the 1.5 s rule has not fired
+ok(d2.inTake(), 'still in the take after 0.3 s of quiet (silence rule is 1.5 s)');
+var fe = d2.forceEnd();
+ok(fe && fe.type === 'end' && near(fe.start, 0, 0.011) && near(fe.end, 0.6, 0.02), 'forceEnd() ends the take at the end of the sound: ' + (fe ? fe.start.toFixed(2) + '-' + fe.end.toFixed(2) : 'null'));
+ok(!d2.inTake() && d2.forceEnd() === null, 'and nothing is left in progress');
+
 // ── flow.wav (used by the browser test) ──────────────────────────────────
 print('flow.wav');
 var fw = parseWav(read(DIR + '/flow.wav', 'binary'));

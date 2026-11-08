@@ -26,25 +26,57 @@ from urllib.parse import urlparse, parse_qs
 
 import processing
 
-VERSION = "R3"
+VERSION = "R4"
 DEFAULT_PORT = 8212
-DEFAULT_SETTINGS = {
-    "website_folder": "~/Documents/212english-website",
-    "mic_tip": "Same distance from the microphone every time (about a fist away), "
-               "and the same gain setting on the mic. Speak across it, not straight into it.",
-}
+DEFAULT_MIC_TIP = ("Same distance from the microphone every time (about a fist away), "
+                   "and the same gain setting on the mic. Speak across it, not straight into it.")
+DEFAULT_SETTINGS = {"website_folder": "~/Documents/212english-website"}
 
-# The lists. Only Sounds works in R1; the others come in later steps (the cards show "coming soon").
-LISTS = {
-    "sounds":    {"title": "Sounds",          "silence_ms": 500, "prompt": "Say the sound once", "ready": True,
-                  "note": "67 sounds, 8 of them with two versions", "prefix": "sound:", "output_dirs": ["sounds", "alone"]},
-    "words":     {"title": "Challenge words", "silence_ms": 700, "prompt": "Say the word", "ready": False,
-                  "note": "Rare words and names. Coming in a later step."},
-    "sentences": {"title": "Sentences",       "silence_ms": 1000, "prompt": "Read the sentence", "ready": False,
-                  "note": "Coming in a later step."},
-    "common":    {"title": "Common words",    "silence_ms": 700, "prompt": "Say the word", "ready": False,
-                  "note": "Later."},
+# Every option on the Options menu: name -> (type, default, min or choices, max). Anything not valid falls back to the default.
+OPTION_SPEC = {
+    # recording
+    "noise_suppression":          ("bool", True),
+    "auto_redo":                  ("bool", True),
+    "mode":                       ("enum", "quick", ["quick", "careful"]),
+    "after_redo":                 ("enum", "return", ["return", "stay"]),
+    "countdown":                  ("bool", False),
+    "countdown_ms":               ("int", 1000, 300, 3000),
+    # auto-redo thresholds
+    "auto_redo_min_ms":           ("int", 60, 20, 1000),
+    "auto_redo_max_ms_sounds":    ("int", 3000, 500, 15000),
+    "auto_redo_max_ms_words":     ("int", 3000, 500, 15000),
+    "auto_redo_max_ms_sentences": ("int", 12000, 2000, 60000),
+    "auto_redo_min_rms_db":       ("float", -50.0, -75.0, -25.0),
+    "auto_redo_clip_db":          ("float", -0.3, -6.0, 0.0),
+    "auto_redo_max_tries":        ("int", 2, 1, 5),
+    # detection
+    "silence_ms_sounds":          ("int", 500, 200, 3000),
+    "silence_ms_words":           ("int", 700, 200, 4000),
+    "silence_ms_sentences":       ("auto_int", "auto", 500, 5000),
+    "sentence_silence_base_ms":   ("int", 1000, 500, 4000),
+    "sentence_silence_per_word_ms": ("int", 80, 0, 400),
+    "sentence_silence_max_ms":    ("int", 2000, 800, 6000),
+    "sentence_short_words":       ("int", 6, 1, 20),
+    "sensitivity_margin_db":      ("float", 12.0, 6.0, 24.0),
+    "retry_step_db":              ("float", 3.0, 1.0, 6.0),
+    # text
+    "mic_tip":                    ("str", DEFAULT_MIC_TIP, 400),
 }
+for _name, (_default, _lo, _hi) in processing.SETTINGS.items():      # the file settings (R2) are options too
+    OPTION_SPEC[_name] = ("int" if _name in ("aac_kbps", "sound_repeats") else "float", _default, _lo, _hi)
+
+# The lists. `kind` says how the items are cut and named.
+LISTS = {
+    "sounds":    {"title": "Sounds",          "prompt": "Say the sound once", "ready": True, "kind": "sounds",
+                  "note": "67 sounds, 8 of them with two versions"},
+    "words":     {"title": "Challenge words", "prompt": "Say the word", "ready": True, "kind": "words",
+                  "note": "Rare words and names, in lesson order"},
+    "sentences": {"title": "Sentences",       "prompt": "Read the sentence", "ready": True, "kind": "sentences",
+                  "note": "In id order. Press Enter (Done) when you finish a sentence"},
+    "common":    {"title": "Common words",    "prompt": "Say the word", "ready": True, "kind": "words",
+                  "note": "Everyday words. Do these last"},
+}
+SAFE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 
 SESSION_ID = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}(-\d+)?_[a-z0-9-]+$")
 WAV_HEADER = 44
@@ -133,26 +165,51 @@ class Studio:
                 })
         return items
 
+    @staticmethod
+    def _num(text, fallback=10 ** 9):
+        digits = re.sub(r"\D", "", str(text))
+        return int(digits) if digits else fallback
+
+    def words_items(self, statuses):
+        """Challenge words (rare + names) or common words, each word once, in lesson order."""
+        rows = list(enumerate(self.read_csv("phonics-words.csv")))
+        rows.sort(key=lambda t: (self._num(t[1].get("lesson", "")), t[0]))
+        seen, items = set(), []
+        for _, r in rows:
+            w = (r.get("word") or "").strip()
+            if r.get("status") not in statuses or not w or w in seen or not SAFE_NAME.match(w):
+                continue
+            seen.add(w)
+            items.append({"key": "word:%s" % w, "text": w, "word": w, "lesson": self._num(r.get("lesson", ""), 0)})
+        return items
+
+    def sentences_items(self):
+        rows = list(enumerate(self.read_csv("phonics-sentences.csv")))
+        rows.sort(key=lambda t: (self._num(t[1].get("id", "")), t[0]))
+        items = []
+        for _, r in rows:
+            sid, text = (r.get("id") or "").strip(), (r.get("sentence") or "").strip()
+            if not sid or not text or not SAFE_NAME.match(sid):
+                continue
+            items.append({"key": "sentence:%s" % sid, "text": text, "id": sid, "words": len(text.split())})
+        return items
+
     def list_items(self, name):
+        if name not in LISTS or not LISTS[name]["ready"]:
+            raise StudioError("That list is not ready yet.", 404)
         if name == "sounds":
             return self.sounds_items()
-        raise StudioError("That list is not ready yet.", 404)
+        if name == "words":
+            return self.words_items(("rare", "name"))
+        if name == "common":
+            return self.words_items(("common",))
+        return self.sentences_items()
 
     def list_total(self, name):
         try:
-            if name == "sounds":
-                return len(self.sounds_items())
-            if name == "words":
-                rows = self.read_csv("phonics-words.csv")
-                return len({r["word"] for r in rows if r["status"] in ("rare", "name")})
-            if name == "common":
-                rows = self.read_csv("phonics-words.csv")
-                return len({r["word"] for r in rows if r["status"] == "common"})
-            if name == "sentences":
-                return len(self.read_csv("phonics-sentences.csv"))
+            return len(self.list_items(name))
         except StudioError:
             return None
-        return None
 
     # ── progress and takes on disk ─────────────────────────────────────────
     def read_progress(self):
@@ -221,28 +278,105 @@ class Studio:
     def api_config(self):
         return {
             "version": VERSION,
-            "mic_tip": self.settings.get("mic_tip", ""),
+            "mic_tip": self.options()["mic_tip"],
             "website_folder": self.settings["website_folder"],
             "website_ok": self.csv_path("phonics-sounds.csv").exists(),
             "settings_error": self.settings_error,
         }
 
+    # ── options (the gear menu) ────────────────────────────────────────────
+    @staticmethod
+    def _coerce(name, value, strict=False):
+        """Return a valid value for this option. strict=True raises on the wrong type; otherwise falls back to the default."""
+        spec = OPTION_SPEC[name]
+        kind, default = spec[0], spec[1]
+
+        def bad(msg):
+            if strict:
+                raise StudioError("%s: %s" % (name, msg), 400)
+            return default
+        if kind == "bool":
+            return value if isinstance(value, bool) else bad("must be true or false")
+        if kind == "enum":
+            return value if value in spec[2] else bad("must be one of %s" % ", ".join(spec[2]))
+        if kind == "str":
+            return value[:spec[2]] if isinstance(value, str) else bad("must be text")
+        if kind == "auto_int" and value == "auto":
+            return "auto"
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value:
+            return bad("must be a number")
+        lo, hi = spec[2], spec[3]
+        v = min(hi, max(lo, value))
+        return int(round(v)) if kind in ("int", "auto_int") else float(v)
+
+    def options(self):
+        """Every option with its current value (settings.json on top of the defaults)."""
+        return {name: self._coerce(name, self.settings.get(name, spec[1])) for name, spec in OPTION_SPEC.items()}
+
+    def api_settings(self):
+        spec = {}
+        for name, sp in OPTION_SPEC.items():
+            e = {"type": sp[0], "default": sp[1]}
+            if sp[0] == "enum":
+                e["choices"] = sp[2]
+            elif sp[0] == "str":
+                e["max"] = sp[2]
+            else:
+                if sp[0] != "bool":
+                    e["min"], e["max"] = sp[2], sp[3]
+            spec[name] = e
+        return {"values": self.options(), "spec": spec}
+
+    def set_options(self, values, reset=False):
+        """Save options into settings.json (only the ones that differ from the default). reset=True goes back to the defaults."""
+        if not reset and not isinstance(values, dict):
+            raise StudioError("No values given.", 400)
+        clean = {} if reset else {name: self._coerce(name, v, strict=True) for name, v in values.items() if name in OPTION_SPEC}
+        with self.lock:
+            path = self.root / "settings.json"
+            current = {}
+            if path.exists():
+                try:
+                    with open(path, encoding="utf-8") as f:
+                        loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        current = loaded
+                except (OSError, ValueError):
+                    current = {}
+            if reset:
+                for name in OPTION_SPEC:
+                    current.pop(name, None)
+                    self.settings.pop(name, None)
+            for name, v in clean.items():
+                if v == OPTION_SPEC[name][1]:
+                    current.pop(name, None)
+                    self.settings.pop(name, None)
+                else:
+                    current[name] = v
+                    self.settings[name] = v
+            atomic_write_json(path, current)
+            self.settings_error = None
+            self.proc.cfg = processing.config_from_settings(self.settings)
+        return self.api_settings()
+
     def api_lists(self):
         done = self.progress_done()
         all_items, files = self.read_progress()
+        recorded_by_list = {}
         cards = []
         for name, conf in LISTS.items():
-            total = self.list_total(name)
             count = pending = redo = unchecked = 0
+            total = None
             if conf["ready"]:
                 try:
-                    keys = [i["key"] for i in self.list_items(name)]
+                    items = self.list_items(name)
+                    total = len(items)
+                    keys = {i["key"] for i in items}
                     recorded, _ = self.recorded_and_today(name)
                     count = sum(1 for k in keys if k in done or k in recorded)
                     pending = sum(1 for k in keys if k in recorded)
                     redo = sum(1 for k in keys if all_items.get(k, {}).get("redo") and k not in recorded)
-                    prefix = conf.get("prefix", "\0")
-                    unchecked = sum(1 for rel, f in files.items() if not f.get("review") and any(k.startswith(prefix) for k in f.get("keys", []))
+                    unchecked = sum(1 for rel, f in files.items() if not f.get("review") and keys & set(f.get("keys", []))
                                     and (self.proc.out / rel).exists())
                 except StudioError:
                     pass
@@ -256,7 +390,7 @@ class Studio:
         conf = LISTS[name]
         items = self.list_items(name)
         recorded, today = self.recorded_and_today(name)
-        return {"list": name, "title": conf["title"], "silence_ms": conf["silence_ms"], "prompt": conf["prompt"],
+        return {"list": name, "title": conf["title"], "kind": conf["kind"], "prompt": conf["prompt"],
                 "items": items, "done": self.progress_done(), "recorded": recorded, "today": today,
                 "redo": sorted(k for k, v in self.progress_items().items() if v.get("redo") and k not in recorded)}
 
@@ -271,21 +405,23 @@ class Studio:
         """Every file the studio made for this list, with its check state (null = not checked yet)."""
         if list_name not in LISTS or not LISTS[list_name]["ready"]:
             raise StudioError("That list is not ready yet.", 404)
-        order = {}
-        for n, it in enumerate(self.list_items(list_name)):
-            order.setdefault(str(it["no"]), n)
+        order = {it["key"]: n for n, it in enumerate(self.list_items(list_name))}
         _, files = self.read_progress()
         site = self.website() / "portal" / "audio" / "phonics"
         out = []
         for rel, f in files.items():
-            if not (self.proc.out / rel).exists():
+            if not (self.proc.out / rel).exists() or not (set(f.get("keys", [])) & set(order)):
                 continue
             e = dict(f)
             e["file"] = rel
             e["robot"] = (site / rel).is_file()
             e["review"] = f.get("review") or None
             out.append(e)
-        out.sort(key=lambda e: (order.get(str(e.get("no")), 10 ** 9), self._file_rank(e["file"]), e["file"]))
+        group_pos = {}                              # files of one sound/word stay together, in the list's order
+        for e in out:
+            pos = min(order.get(k, 10 ** 9) for k in e.get("keys", []))
+            group_pos[str(e.get("no"))] = min(pos, group_pos.get(str(e.get("no")), 10 ** 9))
+        out.sort(key=lambda e: (group_pos[str(e.get("no"))], self._file_rank(e["file"]), e["file"]))
         return {"list": list_name, "files": out, "output_dir": str(self.proc.out)}
 
     def set_review(self, rels, review):
@@ -414,32 +550,39 @@ class Studio:
     def process_list(self, list_name, rebuild=False):
         """Cut every unfinished recording of this list into files. rebuild=True remakes ALL files from the saved
         cuts (after changing a setting such as the loudness or the bitrate)."""
-        if list_name != "sounds":
+        if list_name not in LISTS or not LISTS[list_name]["ready"]:
             raise StudioError("That list is not ready yet.", 404)
         if not self.proc_lock.acquire(blocking=False):
             raise StudioError("The studio is already cutting. Wait a moment.", 409)
         try:
-            return self._process_sounds(rebuild)
+            return self._process(list_name, rebuild)
         finally:
             self.proc_lock.release()
 
-    def _process_sounds(self, rebuild):
-        items = self.sounds_items()
+    @staticmethod
+    def _simple_rel(kind, item):
+        return "words/%s.m4a" % item["word"] if kind == "words" else "sentences/%s.m4a" % item["id"]
+
+    def _process(self, list_name, rebuild):
+        kind = LISTS[list_name]["kind"]
+        items = self.list_items(list_name)
         order = {it["key"]: n for n, it in enumerate(items)}
         by_key = {it["key"]: it for it in items}
-        versions = {str(it["no"]): it["versions"] for it in items}
+        versions = {str(it["no"]): it["versions"] for it in items} if kind == "sounds" else {}
 
         def label(key):
             it = by_key.get(key)
             if not it:
                 return key
+            if kind != "sounds":
+                return it["text"]
             return it["sound"] + (" (as in %s)" % it["key_word"] if it["versions"] > 1 else "")
 
         def title(no):
             first = [it for it in items if str(it["no"]) == str(no)]
             return first[0]["sound"] + (" (%s)" % " / ".join(i["key_word"] for i in first) if len(first) > 1 else "") if first else str(no)
 
-        sessions = [m for m in self.sessions() if m.get("list") == "sounds" and not m.get("finished")]
+        sessions = [m for m in self.sessions() if m.get("list") == list_name and not m.get("finished")]
         latest = {}
         for meta in sessions:
             for key, t in (meta.get("items") or {}).items():
@@ -450,57 +593,71 @@ class Studio:
                     latest[key] = (meta, wall, t)
 
         report = {"cut": 0, "made": [], "waiting": [], "warnings": [], "errors": [], "output_dir": str(self.proc.out),
-                  "rebuild": bool(rebuild), "sessions": len(sessions)}
+                  "rebuild": bool(rebuild), "sessions": len(sessions), "list": list_name}
         progress, files_meta = self.read_progress()
-        touched, cut_keys = set(), []
+        touched, cut_keys = set(), []        # touched: sound numbers (sounds) or item keys (words, sentences)
 
         for key in sorted(latest, key=lambda k: order.get(k, 10 ** 9)):
             meta, wall, t = latest[key]
             it = by_key.get(key)
             if not it:
-                report["errors"].append({"key": key, "label": key, "text": "this item is not in the sounds list any more, so it was left alone"})
+                report["errors"].append({"key": key, "label": key, "text": "this item is not in the list any more, so it was left alone"})
                 continue
             try:
-                entry, new = self.proc.store_cut("sounds", key, self.takes / meta["audio_file"], t, meta["id"])
+                entry, new = self.proc.store_cut(list_name, key, self.takes / meta["audio_file"], t, meta["id"])
             except (processing.ProcessingError, OSError, wave.Error, EOFError) as e:
                 report["errors"].append({"key": key, "label": label(key), "text": str(e)})
                 continue
             report["cut"] += 1 if new else 0
-            touched.add(str(it["no"]))
+            touched.add(str(it["no"]) if kind == "sounds" else key)
             cut_keys.append(key)
             progress[key] = {"at": now_iso(), "session": meta["id"], "start": t["start"], "end": t["end"],
                              "forced": bool(t.get("forced")), "cut": entry["file"]}
+            if t.get("flag"):
+                progress[key]["flag"] = t["flag"]
 
-        idx = self.proc.load_index("sounds")
+        idx = self.proc.load_index(list_name)
         if rebuild:
-            touched = {k.split(":")[1] for k in idx["items"] if k in by_key}
             cut_keys = [k for k in idx["items"] if k in by_key]
+            touched = {str(by_key[k]["no"]) for k in cut_keys} if kind == "sounds" else set(cut_keys)
         for key in cut_keys:
             for w in idx["items"].get(key, {}).get("warnings", []):
                 report["warnings"].append({"key": key, "label": label(key), "text": w})
 
-        for no in sorted(touched, key=lambda n: min(order[k] for k in by_key if str(by_key[k]["no"]) == n)):
-            try:
-                res = self.proc.build_sound(no, versions[no])
-            except (processing.ProcessingError, OSError, wave.Error, subprocess.SubprocessError) as e:
-                report["errors"].append({"key": "sound:%s" % no, "label": title(no), "text": str(e)})
-                continue
-            names = [f["file"] for f in res["files"]]
-            all_keys = ["sound:%s:v%d" % (no, v) for v in range(1, versions[no] + 1)]
-            for f in res["files"]:
-                f["title"] = title(no)
-                keys = all_keys if f["kind"] == "sounds" else ["sound:%s:v%d" % (no, f["version"])]
-                # a freshly built file starts unchecked
-                files_meta[f["file"]] = {"kind": f["kind"], "no": no, "version": f["version"], "title": title(no), "keys": keys,
-                                         "seconds": f["seconds"], "rms_db": f["rms_db"], "peak_db": f["peak_db"],
-                                         "limited_by_peak": f["limited_by_peak"], "bytes": f["bytes"], "kbps": f["kbps"], "built": now_iso()}
-            report["made"].extend(res["files"])
-            if res["waiting"]:
-                report["waiting"].append({"no": no, "label": title(no), "text": res["waiting"]})
-            for v in range(1, versions[no] + 1):
-                k = "sound:%s:v%d" % (no, v)
-                if k in progress:
-                    progress[k]["files"] = names
+        if kind == "sounds":
+            for no in sorted(touched, key=lambda n: min(order[k] for k in by_key if str(by_key[k]["no"]) == n)):
+                try:
+                    res = self.proc.build_sound(no, versions[no])
+                except (processing.ProcessingError, OSError, wave.Error, subprocess.SubprocessError) as e:
+                    report["errors"].append({"key": "sound:%s" % no, "label": title(no), "text": str(e)})
+                    continue
+                names = [f["file"] for f in res["files"]]
+                all_keys = ["sound:%s:v%d" % (no, v) for v in range(1, versions[no] + 1)]
+                for f in res["files"]:
+                    f["title"] = title(no)
+                    keys = all_keys if f["kind"] == "sounds" else ["sound:%s:v%d" % (no, f["version"])]
+                    files_meta[f["file"]] = self._file_meta(f, no, title(no), keys)       # a freshly built file starts unchecked
+                report["made"].extend(res["files"])
+                if res["waiting"]:
+                    report["waiting"].append({"no": no, "label": title(no), "text": res["waiting"]})
+                for v in range(1, versions[no] + 1):
+                    k = "sound:%s:v%d" % (no, v)
+                    if k in progress:
+                        progress[k]["files"] = names
+        else:
+            for key in sorted(touched, key=lambda k: order[k]):
+                it = by_key[key]
+                rel = self._simple_rel(kind, it)
+                try:
+                    f = self.proc.build_single(list_name, key, rel, kind)
+                except (processing.ProcessingError, OSError, wave.Error, subprocess.SubprocessError) as e:
+                    report["errors"].append({"key": key, "label": label(key), "text": str(e)})
+                    continue
+                f["title"] = it["text"]
+                files_meta[rel] = self._file_meta(f, it.get("word") or it.get("id"), it["text"], [key])
+                report["made"].append(f)
+                if key in progress:
+                    progress[key]["files"] = [rel]
 
         self.write_progress(progress, files_meta)
         for meta in sessions:                       # these recordings are now cut: they are finished
@@ -513,6 +670,12 @@ class Studio:
             except (OSError, ValueError, StudioError):
                 pass
         return report
+
+    @staticmethod
+    def _file_meta(f, group, title, keys):
+        return {"kind": f["kind"], "no": group, "version": f["version"], "title": title, "keys": keys,
+                "seconds": f["seconds"], "rms_db": f["rms_db"], "peak_db": f["peak_db"], "limited_by_peak": f["limited_by_peak"],
+                "bytes": f["bytes"], "kbps": f["kbps"], "built": now_iso()}
 
     def reset_list(self, list_name, everything=False):
         """Start a list over. Unfinished takes move to takes/_old/<date>/. With everything=True the finished files,
@@ -533,25 +696,29 @@ class Studio:
                 moved += 1
             files = 0
             if everything:
-                conf = LISTS[list_name]
-                for d in conf.get("output_dirs", []):
-                    src = self.proc.out / d
-                    if src.exists() and any(src.iterdir()):
-                        (dest / "output").mkdir(parents=True, exist_ok=True)
-                        shutil.move(str(src), str(dest / "output" / d))
+                try:
+                    keyset = {i["key"] for i in self.list_items(list_name)}
+                except StudioError:
+                    keyset = set()
+                prog, fmeta = self.read_progress()
+                mine_files = {rel for rel, f in fmeta.items() if keyset & set(f.get("keys", []))}
+                mine_items = {k for k in prog if k in keyset}
+                for rel in sorted(mine_files):                   # only this list's files (words/ is shared with Common words)
+                    src = self.proc.out / rel
+                    if src.exists():
+                        (dest / "output" / rel).parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(src), str(dest / "output" / rel))
                         files += 1
                 cuts = self.proc.cut_dir(list_name)
                 if cuts.exists():
                     dest.mkdir(parents=True, exist_ok=True)
                     shutil.move(str(cuts), str(dest / "cuts"))
                     files += 1
-                prog, fmeta = self.read_progress()
-                mine = {k: v for k, v in prog.items() if k.startswith(conf.get("prefix", "\0"))}
-                if mine or fmeta:
+                if mine_items or mine_files:
                     dest.mkdir(parents=True, exist_ok=True)
                     atomic_write_json(dest / "progress-before.json", {"version": 2, "items": prog, "files": fmeta})
-                    self.write_progress({k: v for k, v in prog.items() if k not in mine},
-                                        {k: v for k, v in fmeta.items() if v.get("kind") not in conf.get("output_dirs", [])})
+                    self.write_progress({k: v for k, v in prog.items() if k not in mine_items},
+                                        {k: v for k, v in fmeta.items() if k not in mine_files})
                     files += 1
         return {"moved": moved, "folder": str(dest) if (moved or files) else None, "everything": bool(everything)}
 
@@ -652,6 +819,8 @@ def make_handler(studio, port):
                     return self.send_json(studio.api_config())
                 if path == "/api/lists":
                     return self.send_json(studio.api_lists())
+                if path == "/api/settings":
+                    return self.send_json(studio.api_settings())
                 m = re.match(r"^/api/list/([a-z]+)$", path)
                 if m:
                     return self.send_json(studio.api_list(m.group(1)))
@@ -694,6 +863,9 @@ def make_handler(studio, port):
                 if path == "/api/reset":
                     b = self.read_json()
                     return self.send_json(studio.reset_list(b.get("list", ""), bool(b.get("everything"))))
+                if path == "/api/settings":
+                    b = self.read_json()
+                    return self.send_json(studio.set_options(b.get("values"), bool(b.get("reset"))))
                 if path == "/api/review":
                     b = self.read_json()
                     return self.send_json(studio.set_review(b.get("files"), b.get("review")))

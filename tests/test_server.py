@@ -24,7 +24,9 @@ SOUNDS_CSV = """sound_no,sound,key_word,ipa,tip_ja
 23,th,that / thumb,ð / θ,tip
 24,sh,shoe,ʃ,tip
 """
-WORDS_CSV = "lesson,group,word,status,note,source\n4,d,cod,common,,Mike\n4,d,cad,rare,,Mike\n8,h,hal,name,,Mike\n9,t,cad,rare,,Mike\n9,t,xx,removed,,Mike\n"
+WORDS_CSV = ("lesson,group,word,status,note,source\n9,t,tab,common,,Mike\n4,d,cod,common,,Mike\n4,d,cad,rare,,Mike\n8,h,hal,name,,Mike\n"
+             "9,t,cad,rare,,Mike\n9,t,xx,removed,,Mike\n5,g,bad name,rare,,Mike\n")
+SENTENCES_CSV = "id,lesson,target,sentence\nPS10,9,tab,The tab is on the cab.\nPS2,8,ham,Dad had a ham.\nPS1,8,hog,The hog had a log and a hat.\n"
 
 
 def tree_state(folder):
@@ -48,6 +50,7 @@ class ServerTest(unittest.TestCase):
         d.mkdir(parents=True)
         (d / "phonics-sounds.csv").write_text(SOUNDS_CSV, encoding="utf-8")
         (d / "phonics-words.csv").write_text(WORDS_CSV, encoding="utf-8")
+        (d / "phonics-sentences.csv").write_text(SENTENCES_CSV, encoding="utf-8")
         cls.site_before = tree_state(cls.site)
         cls.studio = studio.Studio(cls.root, {"website_folder": str(cls.site)})
         cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), studio.make_handler(cls.studio, 0))
@@ -91,18 +94,73 @@ class ServerTest(unittest.TestCase):
         st, lists = self.req("GET", "/api/lists")
         by = {c["id"]: c for c in lists["lists"]}
         self.assertEqual(by["sounds"]["total"], 5)           # 4 rows, one with two versions
-        self.assertTrue(by["sounds"]["ready"])
-        self.assertFalse(by["words"]["ready"])
-        self.assertEqual(by["words"]["total"], 2)            # cad (once), hal; 'removed' skipped
-        self.assertEqual(by["common"]["total"], 1)
+        self.assertTrue(all(by[n]["ready"] for n in by))
+        self.assertEqual(by["words"]["total"], 2)            # cad (once), hal; 'removed' skipped; "bad name" has a space
+        self.assertEqual(by["common"]["total"], 2)           # cod, tab
+        self.assertEqual(by["sentences"]["total"], 3)
         st, lst = self.req("GET", "/api/list/sounds")
         keys = [i["key"] for i in lst["items"]]
         self.assertEqual(keys, ["sound:1:v1", "sound:2:v1", "sound:23:v1", "sound:23:v2", "sound:24:v1"])
         th1, th2 = lst["items"][2], lst["items"][3]
         self.assertEqual((th1["key_word"], th2["key_word"], th1["sound"], th1["versions"]), ("that", "thumb", "th", 2))
-        self.assertEqual(lst["silence_ms"], 500)
-        st, err = self.req("GET", "/api/list/words")
+        self.assertEqual(lst["kind"], "sounds")
+        # challenge words: rare + names, each word once, in lesson order (cad lesson 4, hal lesson 8)
+        st, w = self.req("GET", "/api/list/words")
+        self.assertEqual([i["key"] for i in w["items"]], ["word:cad", "word:hal"])
+        self.assertEqual(w["items"][0]["text"], "cad")
+        # common words, lesson order
+        st, c = self.req("GET", "/api/list/common")
+        self.assertEqual([i["key"] for i in c["items"]], ["word:cod", "word:tab"])
+        # sentences in id order (PS1, PS2, PS10: numeric, not alphabetical), with word counts
+        st, se = self.req("GET", "/api/list/sentences")
+        self.assertEqual([i["key"] for i in se["items"]], ["sentence:PS1", "sentence:PS2", "sentence:PS10"])
+        self.assertEqual([i["words"] for i in se["items"]], [8, 4, 6])
+        st, err = self.req("GET", "/api/list/nope")
         self.assertEqual(st, 404)
+
+    def test_01b_options(self):
+        st, o = self.req("GET", "/api/settings")
+        v = o["values"]
+        self.assertEqual((v["auto_redo"], v["mode"], v["silence_ms_sounds"], v["silence_ms_words"], v["silence_ms_sentences"],
+                          v["aac_kbps"], v["pad_s"], v["countdown"], v["after_redo"], v["noise_suppression"]),
+                         (True, "quick", 500, 700, "auto", 64, 0.12, False, "return", True))
+        self.assertIn("min", o["spec"]["silence_ms_sounds"])
+        self.assertEqual(o["spec"]["mode"]["choices"], ["quick", "careful"])
+        # save some: they are clamped, written to settings.json (only what differs from the default), and applied at once
+        st, o = self.req("POST", "/api/settings", {"values": {"mode": "careful", "silence_ms_words": 900, "aac_kbps": 96, "countdown": True,
+                                                              "silence_ms_sentences": 1800, "target_rms_db": -5, "mic_tip": "Hello mic",
+                                                              "auto_redo": True, "pad_s": 0.2}})
+        self.assertEqual(st, 200)
+        v = o["values"]
+        self.assertEqual((v["mode"], v["silence_ms_words"], v["aac_kbps"], v["countdown"], v["silence_ms_sentences"], v["mic_tip"]),
+                         ("careful", 900, 96, True, 1800, "Hello mic"))
+        self.assertEqual(v["target_rms_db"], -6.0, "too loud a target is clamped to the safe maximum")
+        saved = json.loads((self.root / "settings.json").read_text())
+        self.assertEqual(saved["mode"], "careful")
+        self.assertNotIn("auto_redo", saved, "values equal to the default are not written")
+        self.assertEqual(self.studio.proc.cfg["aac_kbps"], 96)
+        self.assertAlmostEqual(self.studio.proc.cfg["pad_s"], 0.2)
+        st, cfg = self.req("GET", "/api/config")
+        self.assertEqual(cfg["mic_tip"], "Hello mic")
+        # "auto" can come back
+        st, o = self.req("POST", "/api/settings", {"values": {"silence_ms_sentences": "auto"}})
+        self.assertEqual(o["values"]["silence_ms_sentences"], "auto")
+        # wrong types and unknown names
+        st, o = self.req("POST", "/api/settings", {"values": {"mode": "fast"}})
+        self.assertEqual(st, 400)
+        st, o = self.req("POST", "/api/settings", {"values": {"countdown": "yes"}})
+        self.assertEqual(st, 400)
+        st, o = self.req("POST", "/api/settings", {"values": {"aac_kbps": "loud"}})
+        self.assertEqual(st, 400)
+        st, o = self.req("POST", "/api/settings", {"values": {"website_folder": "/etc", "nonsense": 1}})
+        self.assertEqual(st, 200)
+        self.assertNotIn("website_folder", json.loads((self.root / "settings.json").read_text()), "the site folder is not an option")
+        # it all survives a restart; reset puts the defaults back and keeps other keys (the website folder)
+        again = studio.Studio(self.root, {"website_folder": str(self.site)})
+        self.assertEqual(again.options()["mode"], "careful")
+        st, o = self.req("POST", "/api/settings", {"reset": True})
+        self.assertEqual((o["values"]["mode"], o["values"]["aac_kbps"], o["values"]["mic_tip"] == studio.DEFAULT_MIC_TIP), ("quick", 64, True))
+        self.assertEqual(json.loads((self.root / "settings.json").read_text()), {})
 
     # ── sessions ───────────────────────────────────────────────────────────
     def test_02_session_audio_and_times(self):

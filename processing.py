@@ -10,6 +10,8 @@ Where things go (all inside the studio folder, never inside the website):
     output/phonics/sounds/<no>.m4a       the sound 3 times, with gaps (two-version sounds: v1 x3, pause, v2 x3)
     output/phonics/alone/<no>.m4a        the single sound (version 1)
     output/phonics/alone/<no>-2.m4a      the single second version (two-version sounds only; the site uses this name)
+    output/phonics/words/<word>.m4a      a challenge word or common word
+    output/phonics/sentences/<id>.m4a    a sentence
 
 Everything is rebuilt from the cuts, so changing a setting (loudness, bitrate, gap...) and pressing "Rebuild"
 needs no re-recording.
@@ -306,6 +308,16 @@ class Processor:
                 raise ProcessingError("afconvert failed: %s" % (r.stderr.strip() or r.stdout.strip() or "no message"))
             os.replace(str(dst), str(out_path))
         return out_path.stat().st_size
+
+    # -- one word or sentence -> its file --
+    def build_single(self, list_name, key, rel, kind):
+        """Make words/<word>.m4a or sentences/<id>.m4a from the saved cut."""
+        x, sr, region = self.load_cut(list_name, key)
+        seg, stats = self.make_segment(x, sr, region)
+        size = self.encode_m4a(seg, sr, self.out / rel)
+        return {"file": rel, "kind": kind, "version": 1, "seconds": round(len(seg) / float(sr), 3),
+                "rms_db": stats["rms_db"], "peak_db": stats["peak_db"], "gain_db": stats["gain_db"],
+                "limited_by_peak": stats["limited_by_peak"], "bytes": size, "kbps": self.cfg["aac_kbps"]}
 
     # -- one sound -> its files --
     def build_sound(self, no, versions, list_name="sounds"):
