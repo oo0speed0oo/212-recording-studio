@@ -10,3 +10,7 @@ settings.json
 
 # Mac
 .DS_Store
+
+# Generated test audio (made fresh by tests/make_test_audio.py)
+tests/audio/
+__pycache__/

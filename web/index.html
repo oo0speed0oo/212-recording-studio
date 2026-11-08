@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>212 Recording Studio</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- 1. Pick a list -->
+<section id="s-list" class="screen">
+  <div class="wrap">
+    <h1>212 Recording Studio</h1>
+    <p class="sub">Pick a list and read it out loud. The program cuts your recording up and names every file for you.</p>
+    <div id="warn" class="warn hidden"></div>
+    <div id="cards" class="cards"></div>
+    <p id="msg-list" class="note"></p>
+    <p class="tiny">
+      <button id="btn-reset" class="link" type="button">Start Sounds over</button>
+      Your unfinished takes are moved to <code>takes/_old</code>. Nothing is deleted.
+    </p>
+  </div>
+</section>
+
+<!-- 2. Quiet check -->
+<section id="s-check" class="screen hidden">
+  <div class="wrap narrow">
+    <button id="btn-check-back" class="link" type="button">← Lists</button>
+    <h2>Quiet check</h2>
+    <div class="mic-row">
+      <label>Microphone
+        <select id="mic-select"></select>
+      </label>
+      <label class="inline"><input type="checkbox" id="ns-check" checked> Noise suppression</label>
+    </div>
+    <div class="check-box">
+      <div id="check-title" class="check-title">Starting the microphone…</div>
+      <div class="bar"><i id="check-bar"></i></div>
+      <div id="check-result" class="check-result"></div>
+      <div class="muted small" style="margin-top:14px">Your microphone right now (say something to see it move):</div>
+      <div class="meter" style="margin-top:6px"><i id="check-meter-fill"></i></div>
+    </div>
+    <p id="check-error" class="err hidden"></p>
+    <div class="tip"><b>Mic setup</b><span id="mic-tip"></span></div>
+    <div class="row-btns">
+      <button id="btn-recheck" class="btn" type="button">Check again</button>
+      <button id="btn-start" class="btn primary" type="button" disabled>Start recording</button>
+    </div>
+  </div>
+</section>
+
+<!-- 3. Teleprompter -->
+<section id="s-prompt" class="screen hidden">
+  <header class="topbar">
+    <div class="tb-left"><strong id="p-title">Sounds</strong><span id="p-progress" class="muted"></span></div>
+    <div class="tb-mid"><span id="p-today" class="chip"></span></div>
+    <div class="tb-right">
+      <span id="p-save" class="muted small"></span>
+      <button id="btn-ns" class="btn small" type="button">Noise suppression: on</button>
+      <button id="btn-finish" class="btn small primary" type="button">Finish</button>
+    </div>
+  </header>
+
+  <main id="plist" class="plist" aria-label="Items to record"></main>
+
+  <footer class="dock">
+    <div class="dock-meter">
+      <div class="meter" title="Your voice. The white line is the detection level: your voice must rise above it.">
+        <i id="meter-fill"></i><b id="meter-thr"></b>
+      </div>
+      <div class="status-row">
+        <span id="status" class="status s-listen">Listening…</span>
+        <span id="lasttake" class="muted small"></span>
+      </div>
+      <div id="level-note" class="muted small"></div>
+    </div>
+
+    <div class="dock-buttons">
+      <button id="btn-redo" class="btn" type="button"><kbd>←</kbd> Redo</button>
+      <button id="btn-skip" class="btn" type="button">Skip <kbd>→</kbd></button>
+      <button id="btn-pause" class="btn" type="button"><kbd>Space</kbd> Pause</button>
+      <button id="btn-retry" class="btn" type="button" title="The sound was missed or cut? Listen again, more sensitive."><kbd>R</kbd> Stop &amp; retry</button>
+      <button id="btn-hold" class="btn hold" type="button"><kbd>Enter</kbd> Hold to record</button>
+    </div>
+
+    <div class="dock-scope">
+      <div class="small muted">When I click a finished item:</div>
+      <label class="inline"><input type="radio" name="scope" value="one" checked> Only this one</label>
+      <label class="inline"><input type="radio" name="scope" value="from"> From here</label>
+      <label class="inline"><input type="radio" name="scope" value="range"> Range
+        <input id="range-from" type="number" min="1" value="1"> to <input id="range-to" type="number" min="1" value="1">
+      </label>
+      <button id="btn-range" class="btn small" type="button" disabled>Redo range</button>
+    </div>
+  </footer>
+</section>
+
+<div id="overlay" class="overlay hidden">
+  <div class="overlay-box">
+    <div id="overlay-title" class="check-title">Stay quiet…</div>
+    <div class="bar"><i id="overlay-bar"></i></div>
+    <div class="muted small">Checking the room noise again.</div>
+  </div>
+</div>
+
+<script src="detector.js"></script>
+<script src="prompter.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
