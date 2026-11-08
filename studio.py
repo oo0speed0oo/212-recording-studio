@@ -26,7 +26,7 @@ from urllib.parse import urlparse, parse_qs
 
 import processing
 
-VERSION = "R2"
+VERSION = "R3"
 DEFAULT_PORT = 8212
 DEFAULT_SETTINGS = {
     "website_folder": "~/Documents/212english-website",
@@ -155,24 +155,37 @@ class Studio:
         return None
 
     # ── progress and takes on disk ─────────────────────────────────────────
-    def progress_items(self):
-        """progress.json: { "items": { key: {at, session, start, end, forced, cut, files} } }. An item is done once it is cut."""
+    def read_progress(self):
+        """progress.json: { "items": { key: {at, session, start, end, forced, cut, files, redo?} },
+                            "files": { "alone/1.m4a": {kind, no, title, keys, seconds, rms_db, peak_db, bytes, built, review?} } }
+        An item is done once it is cut, unless the check screen sent it back with Redo."""
         p = self.root / "progress.json"
         if not p.exists():
-            return {}
+            return {}, {}
         try:
             with open(p, encoding="utf-8") as f:
                 data = json.load(f)
-            items = data.get("items", {}) if isinstance(data, dict) else {}
-            return {k: v for k, v in items.items() if isinstance(v, dict)}
+            if not isinstance(data, dict):
+                return {}, {}
+            items = {k: v for k, v in (data.get("items") or {}).items() if isinstance(v, dict)}
+            files = {k: v for k, v in (data.get("files") or {}).items() if isinstance(v, dict)}
+            return items, files
         except (OSError, ValueError):
-            return {}
+            return {}, {}
+
+    def progress_items(self):
+        return self.read_progress()[0]
+
+    def progress_files(self):
+        return self.read_progress()[1]
 
     def progress_done(self):
-        return self.progress_items()
+        return {k: v for k, v in self.progress_items().items() if not v.get("redo")}
 
-    def write_progress(self, items):
-        atomic_write_json(self.root / "progress.json", {"version": 1, "updated": now_iso(), "items": items})
+    def write_progress(self, items, files=None):
+        if files is None:
+            files = self.progress_files()
+        atomic_write_json(self.root / "progress.json", {"version": 2, "updated": now_iso(), "items": items, "files": files})
 
     def sessions(self):
         out = []
@@ -216,20 +229,25 @@ class Studio:
 
     def api_lists(self):
         done = self.progress_done()
+        all_items, files = self.read_progress()
         cards = []
         for name, conf in LISTS.items():
             total = self.list_total(name)
-            count = pending = 0
+            count = pending = redo = unchecked = 0
             if conf["ready"]:
                 try:
                     keys = [i["key"] for i in self.list_items(name)]
                     recorded, _ = self.recorded_and_today(name)
                     count = sum(1 for k in keys if k in done or k in recorded)
                     pending = sum(1 for k in keys if k in recorded)
+                    redo = sum(1 for k in keys if all_items.get(k, {}).get("redo") and k not in recorded)
+                    prefix = conf.get("prefix", "\0")
+                    unchecked = sum(1 for rel, f in files.items() if not f.get("review") and any(k.startswith(prefix) for k in f.get("keys", []))
+                                    and (self.proc.out / rel).exists())
                 except StudioError:
                     pass
             cards.append({"id": name, "title": conf["title"], "ready": conf["ready"], "note": conf["note"],
-                          "total": total, "done": count, "pending": pending})
+                          "total": total, "done": count, "pending": pending, "redo": redo, "unchecked": unchecked})
         return {"lists": cards}
 
     def api_list(self, name):
@@ -239,7 +257,74 @@ class Studio:
         items = self.list_items(name)
         recorded, today = self.recorded_and_today(name)
         return {"list": name, "title": conf["title"], "silence_ms": conf["silence_ms"], "prompt": conf["prompt"],
-                "items": items, "done": self.progress_done(), "recorded": recorded, "today": today}
+                "items": items, "done": self.progress_done(), "recorded": recorded, "today": today,
+                "redo": sorted(k for k, v in self.progress_items().items() if v.get("redo") and k not in recorded)}
+
+    # ── the check screen (R3) ──────────────────────────────────────────────
+    @staticmethod
+    def _file_rank(rel):
+        kind, _, name = rel.partition("/")
+        stem = name[:-4] if name.endswith(".m4a") else name
+        return (0 if kind == "alone" and not stem.endswith("-2") else 1 if kind == "alone" else 2)
+
+    def api_review(self, list_name):
+        """Every file the studio made for this list, with its check state (null = not checked yet)."""
+        if list_name not in LISTS or not LISTS[list_name]["ready"]:
+            raise StudioError("That list is not ready yet.", 404)
+        order = {}
+        for n, it in enumerate(self.list_items(list_name)):
+            order.setdefault(str(it["no"]), n)
+        _, files = self.read_progress()
+        site = self.website() / "portal" / "audio" / "phonics"
+        out = []
+        for rel, f in files.items():
+            if not (self.proc.out / rel).exists():
+                continue
+            e = dict(f)
+            e["file"] = rel
+            e["robot"] = (site / rel).is_file()
+            e["review"] = f.get("review") or None
+            out.append(e)
+        out.sort(key=lambda e: (order.get(str(e.get("no")), 10 ** 9), self._file_rank(e["file"]), e["file"]))
+        return {"list": list_name, "files": out, "output_dir": str(self.proc.out)}
+
+    def set_review(self, rels, review):
+        """Mark files OK or Redo (or clear with None). Redo puts the sounds in those files back in the list as not done."""
+        if review not in ("ok", "redo", None):
+            raise StudioError("Bad review value.", 400)
+        if not isinstance(rels, list) or not rels:
+            raise StudioError("No files given.", 400)
+        with self.lock:
+            items, files = self.read_progress()
+            for rel in rels:
+                if rel not in files:
+                    raise StudioError("Unknown file: %s" % rel, 404)
+            touched = set()
+            for rel in rels:
+                if review:
+                    files[rel]["review"] = review
+                    files[rel]["reviewed_at"] = now_iso()
+                else:
+                    files[rel].pop("review", None)
+                    files[rel].pop("reviewed_at", None)
+                touched.update(files[rel].get("keys", []))
+            for k in touched:                      # a sound is "to redo" while any file made from it says Redo
+                if k in items:
+                    if any(f.get("review") == "redo" and k in f.get("keys", []) for f in files.values()):
+                        items[k]["redo"] = True
+                    else:
+                        items[k].pop("redo", None)
+            self.write_progress(items, files)
+        return {"ok": True, "files": {rel: review for rel in rels}}
+
+    def audio_path(self, source, kind, name):
+        if kind not in ("sounds", "alone", "words", "sentences") or not re.match(r"^[A-Za-z0-9._-]+\.m4a$", name) or ".." in name:
+            raise StudioError("Not found.", 404)
+        base = self.proc.out if source == "out" else self.website() / "portal" / "audio" / "phonics"
+        p = base / kind / name
+        if not p.is_file():
+            raise StudioError("Not found.", 404)
+        return p
 
     # ── recording sessions ─────────────────────────────────────────────────
     def _paths(self, sid):
@@ -366,7 +451,7 @@ class Studio:
 
         report = {"cut": 0, "made": [], "waiting": [], "warnings": [], "errors": [], "output_dir": str(self.proc.out),
                   "rebuild": bool(rebuild), "sessions": len(sessions)}
-        progress = self.progress_items()
+        progress, files_meta = self.read_progress()
         touched, cut_keys = set(), []
 
         for key in sorted(latest, key=lambda k: order.get(k, 10 ** 9)):
@@ -401,8 +486,14 @@ class Studio:
                 report["errors"].append({"key": "sound:%s" % no, "label": title(no), "text": str(e)})
                 continue
             names = [f["file"] for f in res["files"]]
+            all_keys = ["sound:%s:v%d" % (no, v) for v in range(1, versions[no] + 1)]
             for f in res["files"]:
                 f["title"] = title(no)
+                keys = all_keys if f["kind"] == "sounds" else ["sound:%s:v%d" % (no, f["version"])]
+                # a freshly built file starts unchecked
+                files_meta[f["file"]] = {"kind": f["kind"], "no": no, "version": f["version"], "title": title(no), "keys": keys,
+                                         "seconds": f["seconds"], "rms_db": f["rms_db"], "peak_db": f["peak_db"],
+                                         "limited_by_peak": f["limited_by_peak"], "bytes": f["bytes"], "kbps": f["kbps"], "built": now_iso()}
             report["made"].extend(res["files"])
             if res["waiting"]:
                 report["waiting"].append({"no": no, "label": title(no), "text": res["waiting"]})
@@ -411,7 +502,7 @@ class Studio:
                 if k in progress:
                     progress[k]["files"] = names
 
-        self.write_progress(progress)
+        self.write_progress(progress, files_meta)
         for meta in sessions:                       # these recordings are now cut: they are finished
             try:
                 with self.lock:
@@ -454,12 +545,13 @@ class Studio:
                     dest.mkdir(parents=True, exist_ok=True)
                     shutil.move(str(cuts), str(dest / "cuts"))
                     files += 1
-                prog = self.progress_items()
+                prog, fmeta = self.read_progress()
                 mine = {k: v for k, v in prog.items() if k.startswith(conf.get("prefix", "\0"))}
-                if mine:
+                if mine or fmeta:
                     dest.mkdir(parents=True, exist_ok=True)
-                    atomic_write_json(dest / "progress-before.json", {"version": 1, "items": prog})
-                    self.write_progress({k: v for k, v in prog.items() if k not in mine})
+                    atomic_write_json(dest / "progress-before.json", {"version": 2, "items": prog, "files": fmeta})
+                    self.write_progress({k: v for k, v in prog.items() if k not in mine},
+                                        {k: v for k, v in fmeta.items() if v.get("kind") not in conf.get("output_dirs", [])})
                     files += 1
         return {"moved": moved, "folder": str(dest) if (moved or files) else None, "everything": bool(everything)}
 
@@ -508,6 +600,40 @@ def make_handler(studio, port):
             if post and origin and origin not in allowed_origins:
                 raise StudioError("Wrong origin.", 403)
 
+        def send_audio(self, path):
+            # Safari will not play audio unless the server understands byte ranges ("give me bytes 0-1")
+            data = path.read_bytes()
+            size = len(data)
+            start, end, status = 0, size - 1, 200
+            rng = self.headers.get("Range") or ""
+            if rng.startswith("bytes=") and "," not in rng:
+                a, _, b = rng[6:].partition("-")
+                try:
+                    if a == "":
+                        start = max(0, size - int(b))
+                    else:
+                        start = int(a)
+                        end = min(size - 1, int(b)) if b else size - 1
+                except ValueError:
+                    start, end = 0, size - 1
+                if start > end or start >= size:
+                    self.send_response(416)
+                    self.send_header("Content-Range", "bytes */%d" % size)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                status = 206
+            body = data[start:end + 1]
+            self.send_response(status)
+            self.send_header("Content-Type", "audio/mp4")
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", str(len(body)))
+            if status == 206:
+                self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
         def static(self, base, rel):
             base = Path(base).resolve()
             target = (base / rel).resolve()
@@ -529,6 +655,12 @@ def make_handler(studio, port):
                 m = re.match(r"^/api/list/([a-z]+)$", path)
                 if m:
                     return self.send_json(studio.api_list(m.group(1)))
+                m = re.match(r"^/api/audio/(out|robot)/([a-z]+)/([^/]+)$", path)
+                if m:
+                    return self.send_audio(studio.audio_path(m.group(1), m.group(2), m.group(3)))
+                m = re.match(r"^/api/review/([a-z]+)$", path)
+                if m:
+                    return self.send_json(studio.api_review(m.group(1)))
                 if path.startswith("/testaudio/"):
                     return self.static(studio.test_audio, path[len("/testaudio/"):])
                 if path.startswith("/api/"):
@@ -562,6 +694,9 @@ def make_handler(studio, port):
                 if path == "/api/reset":
                     b = self.read_json()
                     return self.send_json(studio.reset_list(b.get("list", ""), bool(b.get("everything"))))
+                if path == "/api/review":
+                    b = self.read_json()
+                    return self.send_json(studio.set_review(b.get("files"), b.get("review")))
                 if path == "/api/process":
                     b = self.read_json()
                     return self.send_json(studio.process_list(b.get("list", ""), bool(b.get("rebuild"))))

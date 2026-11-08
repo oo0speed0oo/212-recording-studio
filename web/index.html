@@ -18,6 +18,10 @@
       <span id="pending-text"></span>
       <button id="btn-cut-now" class="btn small primary" type="button">Cut and file them now</button>
     </div>
+    <div id="tocheck" class="notice hidden">
+      <span id="tocheck-text"></span>
+      <button id="btn-check-files" class="btn small primary" type="button">Check the files</button>
+    </div>
     <div id="cards" class="cards"></div>
     <p id="msg-list" class="note"></p>
     <div class="tiny tools">
@@ -104,15 +108,22 @@
   </footer>
 </section>
 
-<!-- 4. Result of cutting and filing -->
-<section id="s-result" class="screen hidden">
+<!-- 4. Check screen: play every new file, OK or Redo -->
+<section id="s-review" class="screen hidden">
   <div class="wrap">
-    <h2 id="res-title">Done</h2>
-    <p id="res-summary" class="sub"></p>
-    <div id="res-problems"></div>
-    <div id="res-files"></div>
-    <p id="res-where" class="tiny"></p>
-    <div class="row-btns"><button id="btn-res-back" class="btn primary" type="button">Back to the lists</button></div>
+    <h2 id="rv-title">Check your files</h2>
+    <p id="rv-summary" class="sub"></p>
+    <div id="rv-problems"></div>
+    <div class="rv-bar">
+      <button id="btn-playall" class="btn primary" type="button">▶ Play all</button>
+      <button id="btn-stopall" class="btn" type="button" disabled>■ Stop</button>
+      <button id="btn-okall" class="btn" type="button">OK all not yet checked</button>
+      <label class="inline small"><input type="checkbox" id="rv-showall"> Show files I already checked</label>
+      <span id="rv-status" class="rv-status"></span>
+    </div>
+    <div id="rv-files"></div>
+    <p id="rv-where" class="tiny"></p>
+    <div class="row-btns"><button id="btn-rv-back" class="btn primary" type="button">Back to the lists</button></div>
   </div>
 </section>
 

@@ -6,8 +6,9 @@ You read from a scrolling teleprompter into one long recording. The program find
 and (from step R2) cuts the recording up, names every file the way the website needs it,
 and puts the files in the right folders. No file work for you.
 
-**Status: step R2.** The Sounds teleprompter records you, and **Finish** cuts every sound out, evens out the loudness,
-names the files the way the website needs them and saves them. The check screen (play each file, OK / Redo) comes in step R3.
+**Status: step R3.** The Sounds teleprompter records you, **Finish** cuts every sound out, evens out the loudness,
+names the files the way the website needs them and saves them, and the **check screen** lets you play every new file and
+press OK or Redo.
 
 ## Start it
 
@@ -61,10 +62,25 @@ How each sound is prepared: cut out of the long recording with 0.12 s of quiet e
 10 ms fade in and out, then set to the same loudness (RMS about −20 dB; the loudest peak never goes above −1 dB, which wins when they
 disagree). Files from different days sound equally loud. Saved as AAC `.m4a`, 64 kbps.
 
-The result screen lists every file with its length and loudness, and warns about anything suspicious: clipped (too loud),
+After Finish the **check screen** opens. It warns about anything suspicious: clipped (too loud),
 very quiet (mic too far, or the sound was missed), very short (a quick /k/ may be cut).
 If something went wrong or you closed the window without pressing Finish, the lists screen says "N recorded items are waiting
 to be cut" with a button. Your recordings are never lost.
+
+## The check screen
+
+Every new file is listed with its length and loudness. For each file:
+
+* **▶** plays it (press again to stop). **Play all** plays every file on the screen in order. **■ Stop** stops.
+* **Compare with robot** (shown when the website has a robot file of the same name) plays the old robot voice, then yours.
+  The studio only reads the website's audio folder; it never changes it.
+* **OK** means you are happy with it. **Redo** puts that sound back in the Sounds list (amber ↻) so you record it again next time.
+  Press the same button again to take it back. **OK all not yet checked** marks everything on the screen OK.
+* Redo on `alone/…` sends just that sound back. Redo on `sounds/…` sends the sound (both versions for a two-version sound) back.
+* Files you have already checked are hidden; tick **Show files I already checked** to see them all.
+* Closed it by mistake? The lists screen says "N files are waiting for you to check" with a button.
+
+Re-recording a sound and pressing Finish replaces its files, and they come back unchecked.
 
 **Redo a sound later:** record it again (click it in the list). Finish replaces just that sound's files. The older cut is moved to
 `output-wav/_replaced/`, never deleted.

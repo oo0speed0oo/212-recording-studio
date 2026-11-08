@@ -140,3 +140,29 @@ button { font: inherit; color: inherit; }
 .prob.err { background: #3b1a1d; border: 1px solid #7a2a30; color: #ffc4c8; }
 .prob.wait { background: #1b2a44; border: 1px solid #2d4a7a; color: #cfe0ff; }
 @media (max-width: 700px) { .res-row { grid-template-columns: 1fr auto; } }
+
+/* R3: check screen */
+.rv-bar { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; padding: 12px 0; margin-bottom: 8px;
+  background: var(--bg); border-bottom: 1px solid var(--line); }
+.rv-status { color: var(--blue); font-size: 14px; min-height: 20px; }
+.rv-row { display: grid; grid-template-columns: 44px minmax(120px, 1fr) auto auto; gap: 10px 14px; align-items: center; padding: 6px 0; border-top: 1px solid var(--line); }
+.rv-row:first-of-type { border-top: 0; }
+.rv-row code { color: var(--text); background: none; padding: 0; font-size: 15px; }
+.rv-row .what { display: block; color: var(--muted); font-size: 12px; }
+.rv-row .meta { color: var(--muted); font-size: 13px; white-space: nowrap; }
+.rv-row .acts { display: flex; gap: 6px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+.rv-row .play { width: 38px; height: 38px; border-radius: 50%; border: 1px solid var(--line); background: var(--panel2); cursor: pointer; font-size: 14px; }
+.rv-row .play:hover { border-color: var(--blue); }
+.rv-row.playing { background: #1b2a44; border-radius: 10px; }
+.rv-row.playing .play { background: var(--blue); color: #08111f; border-color: var(--blue); }
+.rv-row .bt { padding: 6px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel2); cursor: pointer; font-size: 14px; }
+.rv-row .bt:hover { border-color: #667; }
+.rv-row .bt.robot { color: var(--muted); }
+.rv-row.ok .bt.ok { background: var(--green); border-color: var(--green); color: #052214; font-weight: 700; }
+.rv-row.redo .bt.rd { background: var(--amber); border-color: var(--amber); color: #2a1a00; font-weight: 700; }
+.rv-group { margin: 0 0 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 16px; }
+.rv-group h3 { margin: 4px 0 6px; font-size: 18px; }
+.rv-empty { padding: 26px; text-align: center; color: var(--green); border: 2px dashed var(--line); border-radius: 12px; }
+.row.flag .chk { color: var(--amber); }
+.c-redo { color: var(--amber); }
+@media (max-width: 760px) { .rv-row { grid-template-columns: 44px 1fr; } .rv-row .meta, .rv-row .acts { grid-column: 2; justify-content: flex-start; } }

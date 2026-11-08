@@ -44,7 +44,7 @@
 
   function show(name) {
     S.screen = name;
-    ['list', 'check', 'prompt', 'result'].forEach(function (n) { $('s-' + n).classList.toggle('hidden', n !== name); });
+    ['list', 'check', 'prompt', 'review'].forEach(function (n) { $('s-' + n).classList.toggle('hidden', n !== name); });
   }
 
   // ── audio engine: microphone (or a test WAV) -> AudioWorklet -> blocks of raw samples ──────────
@@ -294,6 +294,12 @@
       box.innerHTML = '';
       var waiting = r[1].lists.filter(function (c) { return c.pending > 0; })[0];
       $('pending').classList.toggle('hidden', !waiting);
+      var tocheck = r[1].lists.filter(function (c) { return c.unchecked > 0; })[0];
+      $('tocheck').classList.toggle('hidden', !tocheck || !!waiting);
+      if (tocheck) {
+        $('tocheck-text').textContent = tocheck.unchecked + ' file' + (tocheck.unchecked === 1 ? ' is' : 's are') + ' waiting for you to check (' + tocheck.title + ').';
+        $('btn-check-files').onclick = function () { S.list = S.list || { list: tocheck.id }; showReview(null); };
+      }
       if (waiting) {
         $('pending-text').textContent = waiting.pending + ' recorded item' + (waiting.pending === 1 ? ' is' : 's are') + ' waiting to be cut into files (' + waiting.title + ').';
         $('btn-cut-now').onclick = function () { runProcess(waiting.id, false); };
@@ -302,9 +308,10 @@
         var b = document.createElement('button');
         b.type = 'button'; b.className = 'card'; b.disabled = !c.ready;
         var count = c.ready ? (c.done + ' / ' + (c.total == null ? '?' : c.total) + ' done') : (c.total != null ? c.total + ' items' : '');
+        var redoNote = c.ready && c.redo ? ' <span class="c-redo">· ' + c.redo + ' to redo</span>' : '';
         var pct = c.ready && c.total ? Math.round(100 * c.done / c.total) : 0;
         b.innerHTML = '<div class="c-title">' + esc(c.title) + '</div><div class="c-note">' + esc(c.note) + '</div>'
-          + '<div class="c-count">' + esc(count) + '</div><div class="prog"><i style="width:' + pct + '%"></i></div>';
+          + '<div class="c-count">' + esc(count) + redoNote + '</div><div class="prog"><i style="width:' + pct + '%"></i></div>';
         if (c.ready) b.addEventListener('click', function () { openList(c.id); });
         box.appendChild(b);
       });
@@ -333,6 +340,8 @@
       S.todayBase = {};
       (data.today || []).forEach(function (k) { S.todayBase[k] = true; });
       S.sessionItems = {}; S.events = [];
+      S.redoKeys = {};
+      (data.redo || []).forEach(function (k) { S.redoKeys[k] = true; });
       return runCheck();
     }).catch(function (e) {
       showCheckError(e.message);
@@ -459,43 +468,168 @@
     $('busy').classList.remove('hidden');
     return api('POST', '/api/process', { list: listName, rebuild: !!rebuild }).then(function (rep) {
       $('busy').classList.add('hidden');
-      showResult(rep);
+      showReview(rep);
     }).catch(function (e) {
       $('busy').classList.add('hidden');
       loadListScreen('Could not cut the files: ' + e.message + ' Your recordings are safe in the takes folder. Try "Cut and file them now".');
     });
   }
 
+  // ── check screen: play every file, OK or Redo ───────────────────────────
+  var R = { files: [], sticky: {}, seq: 0, resolveCur: null, playing: null, outDir: '' };
+  var player = new Audio();                                 // one audio element for everything (Safari only lets a "touched" one play)
+
   function kb(n) { return Math.max(1, Math.round(n / 1024)) + ' KB'; }
-  function showResult(rep) {
-    show('result');
+  function fileUrl(f, robot) { return '/api/audio/' + (robot ? 'robot' : 'out') + '/' + f.file + '?v=' + encodeURIComponent(f.built || ''); }
+  function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function rowFor(rel) { return document.querySelector('.rv-row[data-f="' + rel + '"]'); }
+
+  function showReview(rep) {
+    show('review');
     window.scrollTo(0, 0);
-    var made = rep.made || [], sounds = {};
-    made.forEach(function (f) { (sounds[f.no] = sounds[f.no] || { title: f.title, files: [] }).files.push(f); });
-    var nSounds = Object.keys(sounds).length;
-    var title = rep.errors.length ? 'Done, with problems' : (made.length ? 'Done' : 'Nothing new to cut');
-    $('res-title').textContent = title;
-    $('res-summary').textContent = made.length
-      ? (rep.rebuild ? 'Rebuilt ' : 'Cut ' + rep.cut + ' recording' + (rep.cut === 1 ? '' : 's') + ' and made ') + made.length + ' file' + (made.length === 1 ? '' : 's') + ' for ' + nSounds + ' sound' + (nSounds === 1 ? '' : 's') + '.'
-      : 'There were no new recordings to cut.';
+    stopAll();
+    R.sticky = {};
+    $('rv-showall').checked = false;
     var pr = '';
-    (rep.errors || []).forEach(function (e) { pr += '<div class="prob err"><b>' + esc(e.label) + ':</b> ' + esc(e.text) + '</div>'; });
-    (rep.waiting || []).forEach(function (w) { pr += '<div class="prob wait"><b>' + esc(w.label) + ':</b> ' + esc(w.text) + '</div>'; });
-    (rep.warnings || []).forEach(function (w) { pr += '<div class="prob warn">⚠ <b>' + esc(w.label) + ':</b> ' + esc(w.text) + '</div>'; });
-    $('res-problems').innerHTML = pr;
-    var h = '';
-    Object.keys(sounds).forEach(function (no) {
-      var g = sounds[no];
-      h += '<div class="res-group"><h3>' + esc(g.title) + '</h3>';
-      g.files.forEach(function (f) {
-        h += '<div class="res-row"><code>' + esc(f.file) + '</code><span>' + f.seconds.toFixed(2) + ' s</span>'
-          + '<span>' + db1(f.rms_db) + ' dB' + (f.limited_by_peak ? ' <span class="lim" title="Limited by the peak level, so a little quieter than the target">▼</span>' : '') + '</span>'
-          + '<span>' + kb(f.bytes) + '</span></div>';
-      });
-      h += '</div>';
+    if (rep) {
+      (rep.errors || []).forEach(function (e) { pr += '<div class="prob err"><b>' + esc(e.label) + ':</b> ' + esc(e.text) + '</div>'; });
+      (rep.waiting || []).forEach(function (w) { pr += '<div class="prob wait"><b>' + esc(w.label) + ':</b> ' + esc(w.text) + '</div>'; });
+      (rep.warnings || []).forEach(function (w) { pr += '<div class="prob warn">⚠ <b>' + esc(w.label) + ':</b> ' + esc(w.text) + '</div>'; });
+    }
+    $('rv-problems').innerHTML = pr;
+    $('rv-title').textContent = rep && rep.errors && rep.errors.length ? 'Check your files (some problems)' : 'Check your files';
+    return api('GET', '/api/review/' + ((S.list && S.list.list) || 'sounds')).then(function (r) {
+      R.files = r.files; R.outDir = r.output_dir;
+      R.files.forEach(function (f) { if (!f.review) R.sticky[f.file] = true; });
+      var made = rep ? (rep.made || []).length : 0;
+      $('rv-summary').textContent = rep && made
+        ? (rep.rebuild ? 'Rebuilt ' : 'Cut ' + rep.cut + ' recording' + (rep.cut === 1 ? '' : 's') + ' and made ') + made + ' file' + (made === 1 ? '' : 's') + '. Listen to each one, then press OK or Redo.'
+        : (rep ? 'There were no new recordings to cut. ' : '') + 'Listen to each file, then press OK or Redo. Redo puts that sound back in the list to record again.';
+      $('rv-where').innerHTML = R.files.length ? 'Files are in <code>' + esc(R.outDir) + '</code>. ▼ = a little quieter than the −20 dB target because its loudest peak hit the −1 dB limit.' : '';
+      renderReview();
+    }).catch(function (e) { $('rv-files').innerHTML = '<div class="prob err">' + esc(e.message) + '</div>'; });
+  }
+
+  function visibleFiles() {
+    var show = $('rv-showall').checked;
+    return R.files.filter(function (f) { return show || R.sticky[f.file]; });
+  }
+
+  function renderReview() {
+    var vis = visibleFiles(), h = '', last = null;
+    vis.forEach(function (f) {
+      if (f.no !== last) { if (last !== null) h += '</div>'; h += '<div class="rv-group"><h3>' + esc(f.title) + '</h3>'; last = f.no; }
+      var what = f.kind === 'sounds' ? ((f.keys || []).length > 1 ? 'both versions, 3 times each' : 'the sound × 3')
+        : (f.version > 1 ? 'version 2 alone' : ((f.title || '').indexOf('(') > -1 ? 'version 1 alone' : 'the sound alone'));
+      var meta = (f.seconds != null ? f.seconds.toFixed(2) + ' s' : '') + (f.rms_db != null ? ' · ' + db1(f.rms_db) + ' dB' + (f.limited_by_peak ? ' ▼' : '') : '') + (f.bytes ? ' · ' + kb(f.bytes) : '');
+      h += '<div class="rv-row' + (f.review ? ' ' + f.review : '') + '" data-f="' + esc(f.file) + '">'
+        + '<button class="play" type="button" data-act="play" title="Play">▶</button>'
+        + '<div><code>' + esc(f.file) + '</code><span class="what">' + esc(what) + '</span></div>'
+        + '<span class="meta">' + esc(meta) + '</span>'
+        + '<span class="acts">'
+        + (f.robot ? '<button class="bt robot" type="button" data-act="cmp" title="Hear the old robot voice, then yours">Compare with robot</button>' : '')
+        + '<button class="bt ok" type="button" data-act="ok">OK</button>'
+        + '<button class="bt rd" type="button" data-act="redo">Redo</button></span></div>';
     });
-    $('res-files').innerHTML = h;
-    $('res-where').innerHTML = made.length ? 'Files are in <code>' + esc(rep.output_dir) + '</code>. Loudness is the sound\'s RMS level (target −20 dB). The check screen, where you can play each file, comes in the next step.' : '';
+    if (last !== null) h += '</div>';
+    if (!vis.length) h = '<div class="rv-empty">' + (R.files.length ? 'Nothing left to check ✓' : 'There are no files yet. Record some sounds first.') + '</div>';
+    $('rv-files').innerHTML = h;
+    var ok = 0, rd = 0, nw = 0;
+    R.files.forEach(function (f) { if (f.review === 'ok') ok++; else if (f.review === 'redo') rd++; else nw++; });
+    $('btn-playall').disabled = !vis.length;
+    $('btn-okall').disabled = !vis.some(function (f) { return !f.review; });
+    $('rv-status').textContent = R.files.length ? ok + ' OK · ' + rd + ' to redo · ' + nw + ' not checked yet' : '';
+    setPlaying(R.playing);
+  }
+
+  function setPlaying(rel) {
+    R.playing = rel;
+    Array.prototype.forEach.call(document.querySelectorAll('.rv-row'), function (r) {
+      var on = rel && r.dataset.f === rel;
+      r.classList.toggle('playing', !!on);
+      r.querySelector('.play').textContent = on ? '■' : '▶';
+    });
+  }
+
+  function stopAll() {
+    R.seq++;
+    try { player.pause(); } catch (e) {}
+    if (R.resolveCur) { var r = R.resolveCur; R.resolveCur = null; r(); }
+    setPlaying(null);
+    $('btn-stopall').disabled = true;
+    var st = $('rv-status');
+    if (st && R.files.length) renderStatusCounts();
+  }
+  function renderStatusCounts() {
+    var ok = 0, rd = 0, nw = 0;
+    R.files.forEach(function (f) { if (f.review === 'ok') ok++; else if (f.review === 'redo') rd++; else nw++; });
+    $('rv-status').textContent = ok + ' OK · ' + rd + ' to redo · ' + nw + ' not checked yet';
+  }
+
+  function playUrl(url) {
+    return new Promise(function (resolve) {
+      R.resolveCur = resolve;
+      player.onended = function () { R.resolveCur = null; resolve(); };
+      player.onerror = function () { R.resolveCur = null; resolve('error'); };
+      player.src = url;
+      var p = player.play();
+      if (p && p.catch) p.catch(function () { R.resolveCur = null; resolve('blocked'); });
+    });
+  }
+
+  // steps: [{ file, url, label, gap }]  played one after the other
+  function runSeq(steps) {
+    stopAll();
+    var my = ++R.seq;
+    $('btn-stopall').disabled = false;
+    return (async function () {
+      for (var i = 0; i < steps.length; i++) {
+        if (R.seq !== my) return;
+        var s = steps[i];
+        setPlaying(s.file);
+        $('rv-status').textContent = s.label;
+        var r = await playUrl(s.url);
+        if (R.seq !== my) return;
+        if (r) { $('rv-status').textContent = 'Could not play ' + s.file + (r === 'blocked' ? ' (the browser blocked it: click the page and try again)' : ''); await wait(900); }
+        if (s.gap && i < steps.length - 1) await wait(s.gap);
+      }
+      if (R.seq === my) { setPlaying(null); $('btn-stopall').disabled = true; renderStatusCounts(); }
+    })();
+  }
+
+  function playFile(f) {
+    if (R.playing === f.file) { stopAll(); return; }
+    runSeq([{ file: f.file, url: fileUrl(f), label: 'Playing ' + f.file }]);
+  }
+  function compareFile(f) {
+    runSeq([{ file: f.file, url: fileUrl(f, true), label: 'Robot voice: ' + f.file, gap: 500 },
+            { file: f.file, url: fileUrl(f), label: 'Your voice: ' + f.file }]);
+  }
+  function playAll() {
+    var vis = visibleFiles();
+    runSeq(vis.map(function (f, i) { return { file: f.file, url: fileUrl(f), label: 'Playing ' + (i + 1) + ' of ' + vis.length + ': ' + f.file, gap: 400 }; }));
+  }
+
+  function mark(rels, review) {
+    return api('POST', '/api/review', { files: rels, review: review }).then(function () {
+      rels.forEach(function (rel) {
+        R.files.forEach(function (f) { if (f.file === rel) f.review = review; });
+        R.sticky[rel] = true;                               // stays on screen, now showing OK / Redo
+      });
+      renderReview();
+    }).catch(function (e) { $('rv-status').textContent = e.message; });
+  }
+
+  function reviewClick(e) {
+    var b = e.target.closest('[data-act]');
+    if (!b) return;
+    var rowEl = b.closest('.rv-row'), rel = rowEl.dataset.f;
+    var f = R.files.filter(function (x) { return x.file === rel; })[0];
+    if (!f) return;
+    var act = b.dataset.act;
+    if (act === 'play') playFile(f);
+    else if (act === 'cmp') compareFile(f);
+    else mark([rel], f.review === act ? null : act);        // pressing the same button again takes it back
   }
 
   // ── teleprompter list ───────────────────────────────────────────────────
@@ -528,6 +662,9 @@
       row.classList.toggle('done', P.isDone(i));
       row.classList.toggle('cur', i === P.pointer);
       row.classList.toggle('redoing', i === P.pointer && P.redoing());
+      var flag = !P.isDone(i) && !!(S.redoKeys && S.redoKeys[P.items[i].key]);     // sent back from the check screen
+      row.classList.toggle('flag', flag);
+      row.querySelector('.chk').textContent = flag ? '↻' : '✓';
       if (i === poppedIndex) { row.classList.remove('pop'); void row.offsetWidth; row.classList.add('pop'); }
     }
     $('end-banner').classList.toggle('hidden', !P.finished());
@@ -682,7 +819,15 @@
     $('btn-reset').addEventListener('click', function () { startOver(false); });
     $('btn-reset-all').addEventListener('click', function () { startOver(true); });
     $('btn-rebuild').addEventListener('click', function () { runProcess('sounds', true); });
-    $('btn-res-back').addEventListener('click', function () { loadListScreen(); });
+    $('btn-rv-back').addEventListener('click', function () { stopAll(); loadListScreen(); });
+    $('rv-files').addEventListener('click', reviewClick);
+    $('btn-playall').addEventListener('click', playAll);
+    $('btn-stopall').addEventListener('click', stopAll);
+    $('rv-showall').addEventListener('change', function () { stopAll(); renderReview(); });
+    $('btn-okall').addEventListener('click', function () {
+      var rels = visibleFiles().filter(function (f) { return !f.review; }).map(function (f) { return f.file; });
+      if (rels.length) mark(rels, 'ok');
+    });
     $('btn-check-back').addEventListener('click', function () { S.mode = 'idle'; S.measure = null; if (S.engine) S.engine.release(); loadListScreen(); });
     $('btn-recheck').addEventListener('click', function () { runCheck(); });
     $('btn-start').addEventListener('click', function () { startRecording(); });
@@ -730,7 +875,7 @@
     try { S.deviceId = localStorage.getItem('studio.mic') || null; } catch (e) {}
     wire();
     requestAnimationFrame(drawMeter);
-    window.__studio = { S: S, flush: flush, runProcess: runProcess, clickRow: clickRow, redo: redo, skip: skip, retry: retry, pause: pause, finish: finish, holdStart: holdStart, holdEnd: holdEnd };
+    window.__studio = { S: S, flush: flush, runProcess: runProcess, showReview: showReview, R: R, player: player, clickRow: clickRow, redo: redo, skip: skip, retry: retry, pause: pause, finish: finish, holdStart: holdStart, holdEnd: holdEnd };
     loadListScreen().then(function () { if (TEST.list) openList(TEST.list); });
   }
   init();
