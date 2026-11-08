@@ -15,14 +15,18 @@ import os
 import re
 import shutil
 import struct
+import subprocess
 import sys
 import threading
+import wave
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "R1"
+import processing
+
+VERSION = "R2"
 DEFAULT_PORT = 8212
 DEFAULT_SETTINGS = {
     "website_folder": "~/Documents/212english-website",
@@ -33,7 +37,7 @@ DEFAULT_SETTINGS = {
 # The lists. Only Sounds works in R1; the others come in later steps (the cards show "coming soon").
 LISTS = {
     "sounds":    {"title": "Sounds",          "silence_ms": 500, "prompt": "Say the sound once", "ready": True,
-                  "note": "67 sounds, 8 of them with two versions"},
+                  "note": "67 sounds, 8 of them with two versions", "prefix": "sound:", "output_dirs": ["sounds", "alone"]},
     "words":     {"title": "Challenge words", "silence_ms": 700, "prompt": "Say the word", "ready": False,
                   "note": "Rare words and names. Coming in a later step."},
     "sentences": {"title": "Sentences",       "silence_ms": 1000, "prompt": "Read the sentence", "ready": False,
@@ -93,6 +97,8 @@ class Studio:
         if settings_override:
             self.settings.update(settings_override)
         self.takes.mkdir(exist_ok=True)
+        self.proc = processing.Processor(self.root, processing.config_from_settings(self.settings))
+        self.proc_lock = threading.Lock()
 
     # ── website CSVs (read only) ───────────────────────────────────────────
     def website(self):
@@ -149,7 +155,8 @@ class Studio:
         return None
 
     # ── progress and takes on disk ─────────────────────────────────────────
-    def progress_done(self):
+    def progress_items(self):
+        """progress.json: { "items": { key: {at, session, start, end, forced, cut, files} } }. An item is done once it is cut."""
         p = self.root / "progress.json"
         if not p.exists():
             return {}
@@ -157,9 +164,15 @@ class Studio:
             with open(p, encoding="utf-8") as f:
                 data = json.load(f)
             items = data.get("items", {}) if isinstance(data, dict) else {}
-            return {k: v for k, v in items.items() if isinstance(v, dict) or v}
+            return {k: v for k, v in items.items() if isinstance(v, dict)}
         except (OSError, ValueError):
             return {}
+
+    def progress_done(self):
+        return self.progress_items()
+
+    def write_progress(self, items):
+        atomic_write_json(self.root / "progress.json", {"version": 1, "updated": now_iso(), "items": items})
 
     def sessions(self):
         out = []
@@ -206,16 +219,17 @@ class Studio:
         cards = []
         for name, conf in LISTS.items():
             total = self.list_total(name)
-            count = 0
+            count = pending = 0
             if conf["ready"]:
                 try:
                     keys = [i["key"] for i in self.list_items(name)]
                     recorded, _ = self.recorded_and_today(name)
                     count = sum(1 for k in keys if k in done or k in recorded)
+                    pending = sum(1 for k in keys if k in recorded)
                 except StudioError:
                     pass
             cards.append({"id": name, "title": conf["title"], "ready": conf["ready"], "note": conf["note"],
-                          "total": total, "done": count})
+                          "total": total, "done": count, "pending": pending})
         return {"lists": cards}
 
     def api_list(self, name):
@@ -311,8 +325,107 @@ class Studio:
             atomic_write_json(js, meta)
         return {"ok": True}
 
-    def reset_list(self, list_name):
-        """Start a list over: move its unfinished takes into takes/_old/<date>/. Nothing is deleted."""
+    # ── cutting and filing (R2) ────────────────────────────────────────────
+    def process_list(self, list_name, rebuild=False):
+        """Cut every unfinished recording of this list into files. rebuild=True remakes ALL files from the saved
+        cuts (after changing a setting such as the loudness or the bitrate)."""
+        if list_name != "sounds":
+            raise StudioError("That list is not ready yet.", 404)
+        if not self.proc_lock.acquire(blocking=False):
+            raise StudioError("The studio is already cutting. Wait a moment.", 409)
+        try:
+            return self._process_sounds(rebuild)
+        finally:
+            self.proc_lock.release()
+
+    def _process_sounds(self, rebuild):
+        items = self.sounds_items()
+        order = {it["key"]: n for n, it in enumerate(items)}
+        by_key = {it["key"]: it for it in items}
+        versions = {str(it["no"]): it["versions"] for it in items}
+
+        def label(key):
+            it = by_key.get(key)
+            if not it:
+                return key
+            return it["sound"] + (" (as in %s)" % it["key_word"] if it["versions"] > 1 else "")
+
+        def title(no):
+            first = [it for it in items if str(it["no"]) == str(no)]
+            return first[0]["sound"] + (" (%s)" % " / ".join(i["key_word"] for i in first) if len(first) > 1 else "") if first else str(no)
+
+        sessions = [m for m in self.sessions() if m.get("list") == "sounds" and not m.get("finished")]
+        latest = {}
+        for meta in sessions:
+            for key, t in (meta.get("items") or {}).items():
+                if not isinstance(t, dict) or t.get("start") is None or t.get("end") is None:
+                    continue
+                wall = float(t.get("wall") or 0)
+                if key not in latest or wall >= latest[key][1]:
+                    latest[key] = (meta, wall, t)
+
+        report = {"cut": 0, "made": [], "waiting": [], "warnings": [], "errors": [], "output_dir": str(self.proc.out),
+                  "rebuild": bool(rebuild), "sessions": len(sessions)}
+        progress = self.progress_items()
+        touched, cut_keys = set(), []
+
+        for key in sorted(latest, key=lambda k: order.get(k, 10 ** 9)):
+            meta, wall, t = latest[key]
+            it = by_key.get(key)
+            if not it:
+                report["errors"].append({"key": key, "label": key, "text": "this item is not in the sounds list any more, so it was left alone"})
+                continue
+            try:
+                entry, new = self.proc.store_cut("sounds", key, self.takes / meta["audio_file"], t, meta["id"])
+            except (processing.ProcessingError, OSError, wave.Error, EOFError) as e:
+                report["errors"].append({"key": key, "label": label(key), "text": str(e)})
+                continue
+            report["cut"] += 1 if new else 0
+            touched.add(str(it["no"]))
+            cut_keys.append(key)
+            progress[key] = {"at": now_iso(), "session": meta["id"], "start": t["start"], "end": t["end"],
+                             "forced": bool(t.get("forced")), "cut": entry["file"]}
+
+        idx = self.proc.load_index("sounds")
+        if rebuild:
+            touched = {k.split(":")[1] for k in idx["items"] if k in by_key}
+            cut_keys = [k for k in idx["items"] if k in by_key]
+        for key in cut_keys:
+            for w in idx["items"].get(key, {}).get("warnings", []):
+                report["warnings"].append({"key": key, "label": label(key), "text": w})
+
+        for no in sorted(touched, key=lambda n: min(order[k] for k in by_key if str(by_key[k]["no"]) == n)):
+            try:
+                res = self.proc.build_sound(no, versions[no])
+            except (processing.ProcessingError, OSError, wave.Error, subprocess.SubprocessError) as e:
+                report["errors"].append({"key": "sound:%s" % no, "label": title(no), "text": str(e)})
+                continue
+            names = [f["file"] for f in res["files"]]
+            for f in res["files"]:
+                f["title"] = title(no)
+            report["made"].extend(res["files"])
+            if res["waiting"]:
+                report["waiting"].append({"no": no, "label": title(no), "text": res["waiting"]})
+            for v in range(1, versions[no] + 1):
+                k = "sound:%s:v%d" % (no, v)
+                if k in progress:
+                    progress[k]["files"] = names
+
+        self.write_progress(progress)
+        for meta in sessions:                       # these recordings are now cut: they are finished
+            try:
+                with self.lock:
+                    m = self._load_meta(meta["id"])
+                    m["finished"] = True
+                    m["processed_at"] = now_iso()
+                    atomic_write_json(self.takes / (meta["id"] + ".json"), m)
+            except (OSError, ValueError, StudioError):
+                pass
+        return report
+
+    def reset_list(self, list_name, everything=False):
+        """Start a list over. Unfinished takes move to takes/_old/<date>/. With everything=True the finished files,
+        the lossless cuts and the progress of this list move there too. Nothing is ever deleted."""
         if list_name not in LISTS:
             raise StudioError("Unknown list.", 400)
         dest = self.takes / "_old" / datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -327,7 +440,28 @@ class Studio:
                     if p.exists():
                         shutil.move(str(p), str(dest / p.name))
                 moved += 1
-        return {"moved": moved, "folder": str(dest) if moved else None}
+            files = 0
+            if everything:
+                conf = LISTS[list_name]
+                for d in conf.get("output_dirs", []):
+                    src = self.proc.out / d
+                    if src.exists() and any(src.iterdir()):
+                        (dest / "output").mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(src), str(dest / "output" / d))
+                        files += 1
+                cuts = self.proc.cut_dir(list_name)
+                if cuts.exists():
+                    dest.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(cuts), str(dest / "cuts"))
+                    files += 1
+                prog = self.progress_items()
+                mine = {k: v for k, v in prog.items() if k.startswith(conf.get("prefix", "\0"))}
+                if mine:
+                    dest.mkdir(parents=True, exist_ok=True)
+                    atomic_write_json(dest / "progress-before.json", {"version": 1, "items": prog})
+                    self.write_progress({k: v for k, v in prog.items() if k not in mine})
+                    files += 1
+        return {"moved": moved, "folder": str(dest) if (moved or files) else None, "everything": bool(everything)}
 
 
 def make_handler(studio, port):
@@ -426,7 +560,11 @@ def make_handler(studio, port):
                         return self.send_json(studio.save_times(sid, self.read_json()))
                     return self.send_json(studio.close_session(sid))
                 if path == "/api/reset":
-                    return self.send_json(studio.reset_list(self.read_json().get("list", "")))
+                    b = self.read_json()
+                    return self.send_json(studio.reset_list(b.get("list", ""), bool(b.get("everything"))))
+                if path == "/api/process":
+                    b = self.read_json()
+                    return self.send_json(studio.process_list(b.get("list", ""), bool(b.get("rebuild"))))
                 raise StudioError("Not found.", 404)
             except StudioError as e:
                 self.send_json({"error": str(e)}, e.status)

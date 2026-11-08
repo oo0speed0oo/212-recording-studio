@@ -44,7 +44,7 @@
 
   function show(name) {
     S.screen = name;
-    ['list', 'check', 'prompt'].forEach(function (n) { $('s-' + n).classList.toggle('hidden', n !== name); });
+    ['list', 'check', 'prompt', 'result'].forEach(function (n) { $('s-' + n).classList.toggle('hidden', n !== name); });
   }
 
   // ── audio engine: microphone (or a test WAV) -> AudioWorklet -> blocks of raw samples ──────────
@@ -292,6 +292,12 @@
       } else warn.classList.add('hidden');
       var box = $('cards');
       box.innerHTML = '';
+      var waiting = r[1].lists.filter(function (c) { return c.pending > 0; })[0];
+      $('pending').classList.toggle('hidden', !waiting);
+      if (waiting) {
+        $('pending-text').textContent = waiting.pending + ' recorded item' + (waiting.pending === 1 ? ' is' : 's are') + ' waiting to be cut into files (' + waiting.title + ').';
+        $('btn-cut-now').onclick = function () { runProcess(waiting.id, false); };
+      }
       r[1].lists.forEach(function (c) {
         var b = document.createElement('button');
         b.type = 'button'; b.className = 'card'; b.disabled = !c.ready;
@@ -442,9 +448,54 @@
       return api('POST', '/api/session/' + S.sessionId + '/close', {});
     }).catch(function () {}).then(function () {
       if (S.engine) S.engine.release();
-      var id = S.sessionId; S.sessionId = null;
-      loadListScreen('Saved ' + count + ' take' + (count === 1 ? '' : 's') + ' from this session (' + id + '). The cutting and naming comes in the next step.');
+      S.sessionId = null;
+      return runProcess(S.list.list, false);
     });
+  }
+
+  // Cut every unfinished recording into files (or, with rebuild, remake all files from the saved cuts).
+  function runProcess(listName, rebuild) {
+    $('busy-title').textContent = rebuild ? 'Rebuilding the files…' : 'Cutting and filing…';
+    $('busy').classList.remove('hidden');
+    return api('POST', '/api/process', { list: listName, rebuild: !!rebuild }).then(function (rep) {
+      $('busy').classList.add('hidden');
+      showResult(rep);
+    }).catch(function (e) {
+      $('busy').classList.add('hidden');
+      loadListScreen('Could not cut the files: ' + e.message + ' Your recordings are safe in the takes folder. Try "Cut and file them now".');
+    });
+  }
+
+  function kb(n) { return Math.max(1, Math.round(n / 1024)) + ' KB'; }
+  function showResult(rep) {
+    show('result');
+    window.scrollTo(0, 0);
+    var made = rep.made || [], sounds = {};
+    made.forEach(function (f) { (sounds[f.no] = sounds[f.no] || { title: f.title, files: [] }).files.push(f); });
+    var nSounds = Object.keys(sounds).length;
+    var title = rep.errors.length ? 'Done, with problems' : (made.length ? 'Done' : 'Nothing new to cut');
+    $('res-title').textContent = title;
+    $('res-summary').textContent = made.length
+      ? (rep.rebuild ? 'Rebuilt ' : 'Cut ' + rep.cut + ' recording' + (rep.cut === 1 ? '' : 's') + ' and made ') + made.length + ' file' + (made.length === 1 ? '' : 's') + ' for ' + nSounds + ' sound' + (nSounds === 1 ? '' : 's') + '.'
+      : 'There were no new recordings to cut.';
+    var pr = '';
+    (rep.errors || []).forEach(function (e) { pr += '<div class="prob err"><b>' + esc(e.label) + ':</b> ' + esc(e.text) + '</div>'; });
+    (rep.waiting || []).forEach(function (w) { pr += '<div class="prob wait"><b>' + esc(w.label) + ':</b> ' + esc(w.text) + '</div>'; });
+    (rep.warnings || []).forEach(function (w) { pr += '<div class="prob warn">⚠ <b>' + esc(w.label) + ':</b> ' + esc(w.text) + '</div>'; });
+    $('res-problems').innerHTML = pr;
+    var h = '';
+    Object.keys(sounds).forEach(function (no) {
+      var g = sounds[no];
+      h += '<div class="res-group"><h3>' + esc(g.title) + '</h3>';
+      g.files.forEach(function (f) {
+        h += '<div class="res-row"><code>' + esc(f.file) + '</code><span>' + f.seconds.toFixed(2) + ' s</span>'
+          + '<span>' + db1(f.rms_db) + ' dB' + (f.limited_by_peak ? ' <span class="lim" title="Limited by the peak level, so a little quieter than the target">▼</span>' : '') + '</span>'
+          + '<span>' + kb(f.bytes) + '</span></div>';
+      });
+      h += '</div>';
+    });
+    $('res-files').innerHTML = h;
+    $('res-where').innerHTML = made.length ? 'Files are in <code>' + esc(rep.output_dir) + '</code>. Loudness is the sound\'s RMS level (target −20 dB). The check screen, where you can play each file, comes in the next step.' : '';
   }
 
   // ── teleprompter list ───────────────────────────────────────────────────
@@ -619,12 +670,19 @@
 
   // ── wiring ──────────────────────────────────────────────────────────────
   function wire() {
-    $('btn-reset').addEventListener('click', function () {
-      if (!confirm('Start the Sounds list over?\n\nYour unfinished takes are moved aside (into takes/_old). Nothing is deleted.')) return;
-      api('POST', '/api/reset', { list: 'sounds' }).then(function (r) {
-        loadListScreen(r.moved ? 'Started over. ' + r.moved + ' session' + (r.moved === 1 ? '' : 's') + ' moved to ' + r.folder + '.' : 'Nothing to move: there are no unfinished takes.');
+    function startOver(everything) {
+      var msg = everything
+        ? 'Start the Sounds list over COMPLETELY?\n\nThe finished files, the lossless cuts, the progress and your unfinished takes are all moved aside (into takes/_old). Nothing is deleted.'
+        : 'Start the Sounds list over?\n\nYour recordings that are not cut into files yet are moved aside (into takes/_old). Nothing is deleted.';
+      if (!confirm(msg)) return;
+      api('POST', '/api/reset', { list: 'sounds', everything: everything }).then(function (r) {
+        loadListScreen(r.folder ? 'Started over. Moved aside to ' + r.folder : 'Nothing to move.');
       }).catch(function (e) { $('msg-list').textContent = e.message; });
-    });
+    }
+    $('btn-reset').addEventListener('click', function () { startOver(false); });
+    $('btn-reset-all').addEventListener('click', function () { startOver(true); });
+    $('btn-rebuild').addEventListener('click', function () { runProcess('sounds', true); });
+    $('btn-res-back').addEventListener('click', function () { loadListScreen(); });
     $('btn-check-back').addEventListener('click', function () { S.mode = 'idle'; S.measure = null; if (S.engine) S.engine.release(); loadListScreen(); });
     $('btn-recheck').addEventListener('click', function () { runCheck(); });
     $('btn-start').addEventListener('click', function () { startRecording(); });
@@ -672,7 +730,7 @@
     try { S.deviceId = localStorage.getItem('studio.mic') || null; } catch (e) {}
     wire();
     requestAnimationFrame(drawMeter);
-    window.__studio = { S: S, flush: flush, clickRow: clickRow, redo: redo, skip: skip, retry: retry, pause: pause, finish: finish, holdStart: holdStart, holdEnd: holdEnd };
+    window.__studio = { S: S, flush: flush, runProcess: runProcess, clickRow: clickRow, redo: redo, skip: skip, retry: retry, pause: pause, finish: finish, holdStart: holdStart, holdEnd: holdEnd };
     loadListScreen().then(function () { if (TEST.list) openList(TEST.list); });
   }
   init();

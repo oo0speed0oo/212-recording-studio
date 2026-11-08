@@ -14,12 +14,20 @@
     <h1>212 Recording Studio</h1>
     <p class="sub">Pick a list and read it out loud. The program cuts your recording up and names every file for you.</p>
     <div id="warn" class="warn hidden"></div>
+    <div id="pending" class="notice hidden">
+      <span id="pending-text"></span>
+      <button id="btn-cut-now" class="btn small primary" type="button">Cut and file them now</button>
+    </div>
     <div id="cards" class="cards"></div>
     <p id="msg-list" class="note"></p>
-    <p class="tiny">
-      <button id="btn-reset" class="link" type="button">Start Sounds over</button>
-      Your unfinished takes are moved to <code>takes/_old</code>. Nothing is deleted.
-    </p>
+    <div class="tiny tools">
+      <div><button id="btn-rebuild" class="link" type="button">Rebuild all Sounds files</button>
+        with the current settings (loudness, bitrate, gaps). No re-recording needed.</div>
+      <div><button id="btn-reset" class="link" type="button">Start Sounds over</button>
+        Moves recordings that are not cut into files yet to <code>takes/_old</code>.</div>
+      <div><button id="btn-reset-all" class="link" type="button">Start Sounds over completely</button>
+        Also moves the finished files, cuts and progress to <code>takes/_old</code>. Nothing is deleted.</div>
+    </div>
   </div>
 </section>
 
@@ -95,6 +103,26 @@
     </div>
   </footer>
 </section>
+
+<!-- 4. Result of cutting and filing -->
+<section id="s-result" class="screen hidden">
+  <div class="wrap">
+    <h2 id="res-title">Done</h2>
+    <p id="res-summary" class="sub"></p>
+    <div id="res-problems"></div>
+    <div id="res-files"></div>
+    <p id="res-where" class="tiny"></p>
+    <div class="row-btns"><button id="btn-res-back" class="btn primary" type="button">Back to the lists</button></div>
+  </div>
+</section>
+
+<div id="busy" class="overlay hidden">
+  <div class="overlay-box">
+    <div id="busy-title" class="check-title">Cutting and filing…</div>
+    <div class="bar indeterminate"><i></i></div>
+    <div class="muted small">Cutting each sound out of your recording, evening out the loudness and making the files. A few seconds.</div>
+  </div>
+</div>
 
 <div id="overlay" class="overlay hidden">
   <div class="overlay-box">

@@ -21,6 +21,10 @@ echo "== server (lists, saving audio, safety)"
 "$PY" -I tests/test_server.py 2>&1 | tail -4
 "$PY" -I tests/test_server.py > /dev/null 2>&1 || fail=1
 
+echo "== cutting, loudness, naming, .m4a files (R2)"
+"$PY" -I tests/test_processing.py 2>&1 | tail -4
+"$PY" -I tests/test_processing.py > /dev/null 2>&1 || fail=1
+
 echo
 if [ $fail -eq 0 ]; then echo "ALL TESTS PASSED"; else echo "SOME TESTS FAILED"; fi
 exit $fail
