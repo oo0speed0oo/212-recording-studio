@@ -1,0 +1,12 @@
+# Recordings and generated audio (never uploaded)
+takes/
+output/
+output-wav/
+*.wav
+
+# Your own progress and settings
+progress.json
+settings.json
+
+# Mac
+.DS_Store
