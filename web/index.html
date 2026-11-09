@@ -24,6 +24,10 @@
     </div>
     <div id="cards" class="cards"></div>
     <p id="msg-list" class="note"></p>
+    <div class="tools-site">
+      <button id="btn-site" class="btn" type="button">Put on the site…</button>
+      <span id="site-hint" class="tiny"></span>
+    </div>
     <div class="tiny tools">
       <div>Tools for <select id="tools-list"></select>:</div>
       <div><button id="btn-rebuild" class="link" type="button">Rebuild all files</button>
@@ -126,7 +130,24 @@
     </div>
     <div id="rv-files"></div>
     <p id="rv-where" class="tiny"></p>
-    <div class="row-btns"><button id="btn-rv-back" class="btn primary" type="button">Back to the lists</button></div>
+    <div class="row-btns"><button id="btn-rv-back" class="btn primary" type="button">Back to the lists</button>
+      <button id="btn-rv-site" class="btn" type="button">Put on the site…</button></div>
+  </div>
+</section>
+
+<!-- 5. Put the finished files on the site -->
+<section id="s-site" class="screen hidden">
+  <div class="wrap">
+    <div class="title-row"><button id="btn-site-back" class="link" type="button">← Lists</button></div>
+    <h2>Put on the site</h2>
+    <p class="sub">Copies your finished files that you marked <b>OK</b> into the website folder, and into the Local test site so you can
+      try them. Every file it replaces is first <b>moved</b> (never deleted) into <code>_extra_files/robot-voices</code>, and each change is
+      written to <code>replacements.log</code>. Nothing goes to the live site: you upload that yourself after testing.</p>
+    <div id="site-places" class="site-box"></div>
+    <div id="site-msg" class="prob hidden"></div>
+    <div id="site-plan"></div>
+    <div id="site-result" class="hidden"></div>
+    <div id="site-pending" class="hidden"></div>
   </div>
 </section>
 

@@ -5,7 +5,8 @@ Start it with:
     ~/kokoro-env/bin/python ~/Documents/212-recording-studio/studio.py
 
 It opens http://localhost:8212 in your browser. Uses only Python's standard library.
-It only READS the website's CSV lists. It never writes to the website folder.
+It READS the website's CSV lists. It writes to the website folder only in "Put on the site" (siteput.py),
+which copies finished .m4a files and first moves any file it replaces into _extra_files/robot-voices/.
 """
 import argparse
 import csv
@@ -25,12 +26,15 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 import processing
+import siteput
 
-VERSION = "R4"
+VERSION = "R5"
 DEFAULT_PORT = 8212
 DEFAULT_MIC_TIP = ("Same distance from the microphone every time (about a fist away), "
                    "and the same gain setting on the mic. Speak across it, not straight into it.")
-DEFAULT_SETTINGS = {"website_folder": "~/Documents/212english-website"}
+DEFAULT_SETTINGS = {"website_folder": "~/Documents/212english-website",
+                    # where Local (the test copy of the site) keeps its files; used by "Put on the site"
+                    "local_site_folder": "~/Local Sites/212english-local/app/public"}
 
 # Every option on the Options menu: name -> (type, default, min or choices, max). Anything not valid falls back to the default.
 OPTION_SPEC = {
@@ -280,6 +284,7 @@ class Studio:
             "version": VERSION,
             "mic_tip": self.options()["mic_tip"],
             "website_folder": self.settings["website_folder"],
+            "local_site_folder": self.settings.get("local_site_folder"),
             "website_ok": self.csv_path("phonics-sounds.csv").exists(),
             "settings_error": self.settings_error,
         }
@@ -461,6 +466,117 @@ class Studio:
         if not p.is_file():
             raise StudioError("Not found.", 404)
         return p
+
+    # ── putting the files on the site (R5) ─────────────────────────────────
+    def _site(self):
+        return siteput.Site(self.settings["website_folder"], self.settings.get("local_site_folder"))
+
+    def _site_state_path(self):
+        return self.root / "site-state.json"
+
+    def _site_pending(self):
+        try:
+            with open(self._site_state_path(), encoding="utf-8") as f:
+                p = json.load(f).get("pending") or {}
+            return p if isinstance(p, dict) else {}
+        except (OSError, ValueError, AttributeError):
+            return {}
+
+    def _site_write_pending(self, pending):
+        atomic_write_json(self._site_state_path(), {"version": 1, "pending": pending})
+        lst = self.root / "site-upload-list.txt"
+        lines = sorted("/".join(siteput.PHONICS + (rel,)) for rel in pending)
+        if lines:
+            lst.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        elif lst.exists():
+            lst.unlink()                                  # this list is made by the studio itself; it is not a robot file
+
+    @staticmethod
+    def _site_order(rel):
+        kind, _, name = rel.partition("/")
+        nums = [int(n) if n.isdigit() else 0 for n in re.findall(r"\d+", name)]
+        return (["alone", "sounds", "words", "sentences"].index(kind), nums, name)
+
+    def _site_files(self, include_unchecked):
+        """The finished files that may go on the site: marked OK on the check screen (and, if asked, not checked yet).
+        Files marked Redo never go."""
+        _, fmeta = self.read_progress()
+        chosen, counts = [], {"ok": 0, "unchecked": 0, "redo": 0, "missing": 0}
+        for rel, f in fmeta.items():
+            src = self.proc.out / rel
+            if not siteput.SAFE_REL.match(rel) or not src.is_file():
+                counts["missing"] += 1
+                continue
+            r = f.get("review")
+            counts["ok" if r == "ok" else "redo" if r == "redo" else "unchecked"] += 1
+            if r == "ok" or (r is None and include_unchecked):
+                chosen.append((rel, src, f))
+        chosen.sort(key=lambda t: self._site_order(t[0]))
+        return chosen, counts
+
+    def _site_paths(self):
+        lst = self.root / "site-upload-list.txt"
+        site = self._site()
+        return {"upload_list_file": str(lst), "website_folder": str(site.website),
+                "local_folder": str(site.local) if site.local else None,
+                "robot_folder": str(site.backup_dir()), "log_file": str(site.backup_dir() / siteput.LOG_NAME),
+                "git_add": 'cd "%s" && git add --pathspec-from-file="%s"' % (site.website, lst)}
+
+    def api_site_plan(self, include_unchecked=False):
+        """What 'Put on the site' would do right now. Changes nothing."""
+        site = self._site()
+        chosen, counts = self._site_files(include_unchecked)
+        acts = site.plan([(rel, src) for rel, src, _ in chosen])
+        files, summary = [], {"add": 0, "robot": 0, "earlier": 0, "same": 0}
+        for rel, src, f in chosen:
+            a = acts[rel]
+            main = a.get("website", "add")
+            main = "robot" if main == "known" else main          # a robot voice that is already saved is still a robot voice
+            summary[main] += 1
+            files.append({"file": rel, "title": f.get("title") or rel, "review": f.get("review") or None,
+                          "action": main, "local": a.get("local")})
+        pending = sorted(self._site_pending())
+        out = {"files": files, "counts": counts, "summary": summary, "include_unchecked": bool(include_unchecked),
+               "pending": ["/".join(siteput.PHONICS + (rel,)) for rel in pending]}
+        out.update(site.status())
+        out.update(self._site_paths())
+        return out
+
+    def site_put(self, include_unchecked=False):
+        chosen, counts = self._site_files(include_unchecked)
+        if not chosen:
+            raise StudioError("There is nothing to put on the site yet. Files go on the site once you mark them OK on "
+                              "the check screen.", 400)
+        if not self.proc_lock.acquire(blocking=False):
+            raise StudioError("The studio is busy cutting files. Try again in a moment.", 409)
+        try:
+            site = self._site()
+            try:
+                rep = site.put([(rel, src) for rel, src, _ in chosen])
+            except siteput.SiteError as e:
+                raise StudioError(str(e), 500)
+            with self.lock:
+                pending = self._site_pending()
+                stamp = rep["at"]
+                for rel in rep["changed"]:
+                    pending[rel] = stamp
+                self._site_write_pending(pending)
+        finally:
+            self.proc_lock.release()
+        rep.pop("lines", None)
+        rep.update(self._site_paths())
+        rep["pending"] = ["/".join(siteput.PHONICS + (rel,)) for rel in sorted(self._site_pending())]
+        rep["tried"] = len(chosen)
+        return rep
+
+    def site_uploaded(self):
+        """Mike says he uploaded the files: empty the upload list."""
+        with self.lock:
+            n = len(self._site_pending())
+            self._site_write_pending({})
+        if n:
+            self._site().log_note("Marked %d file(s) as uploaded to the live site." % n)
+        return {"cleared": n}
 
     # ── recording sessions ─────────────────────────────────────────────────
     def _paths(self, sid):
@@ -830,6 +946,9 @@ def make_handler(studio, port):
                 m = re.match(r"^/api/review/([a-z]+)$", path)
                 if m:
                     return self.send_json(studio.api_review(m.group(1)))
+                if path == "/api/site/plan":
+                    q = parse_qs(urlparse(self.path).query)
+                    return self.send_json(studio.api_site_plan((q.get("unchecked") or ["0"])[0] == "1"))
                 if path.startswith("/testaudio/"):
                     return self.static(studio.test_audio, path[len("/testaudio/"):])
                 if path.startswith("/api/"):
@@ -869,6 +988,12 @@ def make_handler(studio, port):
                 if path == "/api/review":
                     b = self.read_json()
                     return self.send_json(studio.set_review(b.get("files"), b.get("review")))
+                if path == "/api/site/put":
+                    b = self.read_json()
+                    return self.send_json(studio.site_put(bool(b.get("include_unchecked"))))
+                if path == "/api/site/uploaded":
+                    self.read_json()
+                    return self.send_json(studio.site_uploaded())
                 if path == "/api/process":
                     b = self.read_json()
                     return self.send_json(studio.process_list(b.get("list", ""), bool(b.get("rebuild"))))

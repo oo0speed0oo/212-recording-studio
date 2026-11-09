@@ -37,6 +37,10 @@ echo "== check screen: file list, OK / Redo, audio playback, robot files (R3)"
 "$PY" -I tests/test_review.py 2>&1 | tail -4
 "$PY" -I tests/test_review.py > /dev/null 2>&1 || fail=1
 
+echo "== put on the site: robot backup, copy, log, upload list (R5)"
+"$PY" -I tests/test_site.py 2>&1 | tail -4
+"$PY" -I tests/test_site.py > /dev/null 2>&1 || fail=1
+
 echo
 if [ $fail -eq 0 ]; then echo "ALL TESTS PASSED"; else echo "SOME TESTS FAILED"; fi
 exit $fail

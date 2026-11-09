@@ -6,9 +6,10 @@ You read from a scrolling teleprompter into one long recording. The program find
 and (from step R2) cuts the recording up, names every file the way the website needs it,
 and puts the files in the right folders. No file work for you.
 
-**Status: step R4.** Four lists (Sounds, Challenge words, Sentences, Common words). The teleprompter records you, **Finish** cuts
+**Status: step R5.** Four lists (Sounds, Challenge words, Sentences, Common words). The teleprompter records you, **Finish** cuts
 everything out, evens out the loudness, names the files the way the website needs them and saves them, and the **check screen**
 lets you play every new file and press OK or Redo. The **⚙ Options** menu changes how it all behaves.
+**Put on the site** copies the files you marked OK into the website folder (robot voices saved first).
 
 ## Start it
 
@@ -75,7 +76,7 @@ Every new file is listed with its length and loudness. For each file:
 
 * **▶** plays it (press again to stop). **Play all** plays every file on the screen in order. **■ Stop** stops.
 * **Compare with robot** (shown when the website has a robot file of the same name) plays the old robot voice, then yours.
-  The studio only reads the website's audio folder; it never changes it.
+  Looking and comparing never changes the website.
 * **OK** means you are happy with it. **Redo** puts that sound back in the Sounds list (amber ↻) so you record it again next time.
   Press the same button again to take it back. **OK all not yet checked** marks everything on the screen OK.
 * Redo on `alone/…` sends just that sound back. Redo on `sounds/…` sends the sound (both versions for a two-version sound) back.
@@ -133,8 +134,28 @@ Hold-to-record takes are never judged.
 
 **Microphone reminder:** the text on the quiet-check screen.
 
-Only options that differ from the default are written to `settings.json`. The one other thing in that file is `website_folder`
-(default `~/Documents/212english-website`, where the CSV lists are read from; the studio only **reads** there). See `settings.example.json`.
+Only options that differ from the default are written to `settings.json`. The other things in that file are two folders:
+`website_folder` (default `~/Documents/212english-website`: the CSV lists are read from there, and **Put on the site** copies files into it)
+and `local_site_folder` (default `~/Local Sites/212english-local/app/public`: the Local test copy of the site, optional).
+See `settings.example.json`.
+
+## Put on the site
+
+The lists screen has a **Put on the site…** button (also on the check screen). It is the only thing in the studio that ever writes
+into the website folders, and it only does what is written here:
+
+1. It copies the files you marked **OK** on the check screen into `portal/audio/phonics/` of the website folder **and** of the Local
+   test site (so you can try your voice in the browser). Files marked Redo are never sent. Tick *Also send the files I have not checked yet* to include those.
+2. **Before** a file is replaced, the old one is **moved** (never deleted) to `_extra_files/robot-voices/<same folder>/<same name>` in the website
+   folder. That folder is ignored by git, so the robot voices never go on the site. If you put a newer version of the same file later, the robot
+   voice stays where it is and your earlier version goes to `_extra_files/robot-voices/_earlier-versions/<date>/`.
+3. Every run is written to `_extra_files/robot-voices/replacements.log` (what was new, what was replaced, when).
+4. Files that are already identical are left alone. Each copy is checked byte for byte; if a copy fails, the old file stays.
+5. The files it changed are added to an **upload list** (`site-upload-list.txt`, shown on the screen with a Copy button): the exact files to
+   upload to the live site, no whole folders. Test on Local first, upload those files, then press **I uploaded them** to clear the list.
+   The screen also shows the `git add` command that stages exactly those files (then commit "portal audio only").
+
+Nothing goes to the live site: you upload it yourself. A mix of robot voices and your voice is fine while you roll out.
 
 ## The lists and their files
 
@@ -158,8 +179,9 @@ Words and sentences are cut, levelled and named like sounds (one file each, no r
 | `output-wav/` | a lossless copy of every cut | no |
 | `progress.json` | which items are done | no |
 | `settings.json` | your settings | no |
+| `site-state.json`, `site-upload-list.txt` | the files put on the site that still need uploading | no |
 
-Nothing in this repo ever touches the live website.
+Nothing in this repo ever touches the live website. The only code that writes into the website folders is `siteput.py` (Put on the site).
 
 ## Tests (no microphone needed)
 
@@ -168,5 +190,5 @@ tests/run_tests.sh
 ```
 
 Makes synthetic audio (tones and hiss with silences), runs the voice detector, the Redo/Skip logic, the option rules, the server and the whole
-cut-clean-encode step for all four lists on it (decoding the `.m4a` files back to check lengths, gaps, loudness and bitrate), and says ALL TESTS PASSED. To watch the whole screen run on test audio instead of a microphone, start the studio
+cut-clean-encode step for all four lists on it, and "Put on the site" on throwaway folders (decoding the `.m4a` files back to check lengths, gaps, loudness and bitrate), and says ALL TESTS PASSED. To watch the whole screen run on test audio instead of a microphone, start the studio
 and open `http://localhost:8212/?testaudio=flow.wav&list=sounds&autostart=1` after running the tests once.

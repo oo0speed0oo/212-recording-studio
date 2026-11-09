@@ -64,7 +64,7 @@
 
   function show(name) {
     S.screen = name;
-    ['list', 'check', 'prompt', 'review'].forEach(function (n) { $('s-' + n).classList.toggle('hidden', n !== name); });
+    ['list', 'check', 'prompt', 'review', 'site'].forEach(function (n) { $('s-' + n).classList.toggle('hidden', n !== name); });
   }
 
   // ── audio engine: microphone (or a test WAV) -> AudioWorklet -> blocks of raw samples ──────────
@@ -431,6 +431,7 @@
       var sel = $('tools-list'), keep = sel.value;
       sel.innerHTML = r[1].lists.filter(function (c) { return c.ready; }).map(function (c) { return '<option value="' + c.id + '">' + esc(c.title) + '</option>'; }).join('');
       if (keep) sel.value = keep;
+      siteHint();
     }).catch(function (e) {
       $('warn').classList.remove('hidden');
       $('warn').textContent = 'The studio is not answering (' + e.message + '). Is the Terminal window still running studio.py?';
@@ -1184,6 +1185,141 @@
   }
 
   // ── wiring ──────────────────────────────────────────────────────────────
+
+  // ── 5. Put on the site (R5) ────────────────────────────────────────────────────────────────
+  var SITE = { plan: null, unchecked: false, busy: false };
+  var ACTION_TEXT = { add: 'new file', robot: 'replaces the robot voice', earlier: 'replaces an earlier recording of yours', same: 'already on the site' };
+
+  function showSite() {
+    show('site');
+    window.scrollTo(0, 0);
+    $('site-result').classList.add('hidden');
+    return loadSitePlan();
+  }
+
+  function loadSitePlan() {
+    return api('GET', '/api/site/plan?unchecked=' + (SITE.unchecked ? 1 : 0)).then(function (p) {
+      SITE.plan = p;
+      renderSite();
+    }).catch(function (e) {
+      $('site-msg').className = 'prob err';
+      $('site-msg').textContent = e.message;
+    });
+  }
+
+  function copyText(text, done) {
+    var ok = function () { if (done) done(true); }, fail = function () { if (done) done(false); };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(ok, fail);
+    else fail();
+  }
+
+  function renderSite() {
+    var p = SITE.plan, c = p.counts, sm = p.summary, msg = $('site-msg');
+    $('site-places').innerHTML =
+      '<div class="place"><b>Website folder</b> <code>' + esc(p.website_folder) + '</code> ' + (p.website_ok ? '<span class="yes">found</span>' : '<span class="no">portal/audio/phonics not found</span>') + '</div>'
+      + '<div class="place"><b>Local test site</b> <code>' + esc(p.local_folder || '(not set)') + '</code> ' + (p.local_ok ? '<span class="yes">found</span>' : '<span class="no">not found: it will be skipped</span>') + '</div>'
+      + '<div class="place"><b>Robot voices go to</b> <code>' + esc(p.robot_folder) + '</code></div>';
+    if (!p.website_ok) {
+      msg.className = 'prob err';
+      msg.textContent = 'I cannot find portal/audio/phonics inside ' + p.website_folder + '. Check website_folder in settings.json. Nothing can be put on the site until that is right.';
+      $('site-plan').innerHTML = '';
+      renderPending();
+      return;
+    }
+    msg.className = 'prob hidden';
+    var h = '';
+    if (c.unchecked > 0) {
+      h += '<label class="inline small"><input type="checkbox" id="site-unchecked"' + (SITE.unchecked ? ' checked' : '') + '> Also send the ' + c.unchecked
+        + ' file' + (c.unchecked === 1 ? '' : 's') + ' I have not checked yet</label>';
+    }
+    var n = sm.add + sm.robot + sm.earlier;
+    h += '<div class="site-sum">'
+      + '<span class="chip"><b>' + sm.add + '</b> new</span>'
+      + '<span class="chip"><b>' + sm.robot + '</b> replace a robot voice (saved first)</span>'
+      + (sm.earlier ? '<span class="chip"><b>' + sm.earlier + '</b> replace an earlier recording (saved first)</span>' : '')
+      + '<span class="chip"><b>' + sm.same + '</b> already on the site</span>'
+      + '</div>';
+    var skipped = [];
+    if (c.redo) skipped.push(c.redo + ' marked Redo');
+    if (c.unchecked && !SITE.unchecked) skipped.push(c.unchecked + ' not checked yet');
+    if (skipped.length) h += '<p class="tiny">Not sent: ' + esc(skipped.join(', ')) + '.</p>';
+    if (!p.files.length) {
+      h += '<div class="rv-empty" style="color:var(--muted)">Nothing is ready. On the check screen, press <b>OK</b> on the files that sound good, then come back.</div>';
+    } else {
+      h += '<div class="site-files">' + p.files.map(function (f) {
+        return '<div class="sf"><span><code>' + esc(f.file) + '</code><span class="what">' + esc(f.title) + '</span></span><span class="badge ' + f.action + '">' + esc(ACTION_TEXT[f.action]) + '</span></div>';
+      }).join('') + '</div>';
+      h += '<div class="site-actions"><button id="btn-site-put" class="btn primary" type="button"' + (n ? '' : ' disabled') + '>'
+        + (n ? 'Put ' + n + ' file' + (n === 1 ? '' : 's') + ' on the site' : 'Everything is already on the site') + '</button>'
+        + '<span class="tiny">Takes a moment. You can run it again any time.</span></div>';
+    }
+    $('site-plan').innerHTML = h;
+    var cb = $('site-unchecked');
+    if (cb) cb.addEventListener('change', function () { SITE.unchecked = cb.checked; $('site-result').classList.add('hidden'); loadSitePlan(); });
+    var b = $('btn-site-put');
+    if (b) b.addEventListener('click', function () { putOnSite(n); });
+    renderPending();
+  }
+
+  function putOnSite(n) {
+    var p = SITE.plan;
+    var text = 'Put ' + n + ' file' + (n === 1 ? '' : 's') + ' on the site?\n\n'
+      + 'They are copied into:\n  ' + p.website_folder + (p.local_ok ? '\n  ' + p.local_folder : '') + '\n\n'
+      + (p.summary.robot + p.summary.earlier ? 'The ' + (p.summary.robot + p.summary.earlier) + ' file(s) they replace are moved (not deleted) to:\n  ' + p.robot_folder + '\n\n' : '')
+      + 'Nothing goes to the live site.';
+    if (!window.confirm(text)) return;
+    if (SITE.busy) return;
+    SITE.busy = true;
+    var b = $('btn-site-put'); if (b) { b.disabled = true; b.textContent = 'Copying…'; }
+    api('POST', '/api/site/put', { include_unchecked: SITE.unchecked }).then(function (r) {
+      var box = $('site-result'), h = '<div class="site-done"><h3>Done</h3>'
+        + '<div><b>' + r.added + '</b> new, <b>' + r.replaced + '</b> replaced, <b>' + r.same + '</b> already there'
+        + ' · copied to ' + esc(r.places.map(function (x) { return x === 'local' ? 'the Local test site' : 'the website folder'; }).join(' and ')) + '.</div>'
+        + '<div class="tiny">Replaced files were saved in <code>' + esc(r.robot_folder) + '</code>. What was done is in <code>' + esc(r.log_file) + '</code>.</div></div>';
+      (r.errors || []).forEach(function (e) { h += '<div class="prob err"><b>' + esc(e.file) + '</b> (' + esc(e.place) + '): ' + esc(e.text) + '</div>'; });
+      box.innerHTML = h;
+      box.classList.remove('hidden');
+      return loadSitePlan();
+    }).catch(function (e) {
+      $('site-result').innerHTML = '<div class="prob err">' + esc(e.message) + '</div>';
+      $('site-result').classList.remove('hidden');
+      return loadSitePlan();
+    }).then(function () { SITE.busy = false; });
+  }
+
+  function renderPending() {
+    var p = SITE.plan, box = $('site-pending');
+    if (!p.pending.length) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+    box.classList.remove('hidden');
+    box.innerHTML = '<div class="site-pend"><h3>Waiting to be uploaded (' + p.pending.length + ' file' + (p.pending.length === 1 ? '' : 's') + ')</h3>'
+      + '<p class="small">Test them on your Local site first. Then upload exactly these files to the live site (no whole folders):</p>'
+      + '<textarea id="site-list" readonly></textarea>'
+      + '<div class="site-actions"><button id="btn-site-copy" class="btn small" type="button">Copy the list</button>'
+      + '<button id="btn-site-cmd" class="btn small" type="button">Copy the git command</button>'
+      + '<button id="btn-site-uploaded" class="btn small" type="button">I uploaded them: clear the list</button>'
+      + '<span id="site-copied" class="tiny"></span></div>'
+      + '<div class="tiny">The same list is saved in <code>' + esc(p.upload_list_file) + '</code>. To commit them (portal audio only), tell Claude Code, or run this first:</div>'
+      + '<pre>' + esc(p.git_add) + '</pre></div>';
+    $('site-list').value = p.pending.join('\n');
+    var said = function (ok) { $('site-copied').textContent = ok ? 'Copied.' : 'Could not copy: select the text and press Cmd+C.'; };
+    $('btn-site-copy').addEventListener('click', function () { copyText(p.pending.join('\n') + '\n', said); });
+    $('btn-site-cmd').addEventListener('click', function () { copyText(p.git_add, said); });
+    $('btn-site-uploaded').addEventListener('click', function () {
+      if (!window.confirm('Clear the list? Only do this once the files are uploaded to the live site. The files themselves stay where they are.')) return;
+      api('POST', '/api/site/uploaded', {}).then(function () { return loadSitePlan(); }).catch(function (e) { $('site-msg').className = 'prob err'; $('site-msg').textContent = e.message; });
+    });
+  }
+
+  function siteHint() {
+    api('GET', '/api/site/plan').then(function (p) {
+      var t = [];
+      var n = p.summary.add + p.summary.robot + p.summary.earlier;
+      if (n) t.push(n + ' file' + (n === 1 ? '' : 's') + ' marked OK can go on the site');
+      if (p.pending.length) t.push(p.pending.length + ' waiting to be uploaded');
+      $('site-hint').textContent = t.join(' · ');
+    }).catch(function () { $('site-hint').textContent = ''; });
+  }
+
   function wire() {
     function toolsList() { var sel = $('tools-list'); return { id: sel.value, title: sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : sel.value }; }
     function startOver(everything) {
@@ -1207,6 +1343,9 @@
     $('opt-reset').addEventListener('click', optReset);
     $('btn-done').addEventListener('click', function () { done(); this.blur(); });
     $('btn-rv-back').addEventListener('click', function () { stopAll(); loadListScreen(); });
+    $('btn-rv-site').addEventListener('click', function () { stopAll(); showSite(); });
+    $('btn-site').addEventListener('click', function () { showSite(); });
+    $('btn-site-back').addEventListener('click', function () { loadListScreen(); });
     $('rv-files').addEventListener('click', reviewClick);
     $('btn-playall').addEventListener('click', playAll);
     $('btn-stopall').addEventListener('click', stopAll);
@@ -1268,7 +1407,7 @@
     try { S.deviceId = localStorage.getItem('studio.mic') || null; } catch (e) {}
     wire();
     requestAnimationFrame(drawMeter);
-    window.__studio = { S: S, done: done, optOpen: optOpen, micTest: micTest, flush: flush, runProcess: runProcess, showReview: showReview, R: R, player: player, clickRow: clickRow, redo: redo, skip: skip, retry: retry, pause: pause, finish: finish, holdStart: holdStart, holdEnd: holdEnd };
+    window.__studio = { S: S, done: done, optOpen: optOpen, micTest: micTest, flush: flush, runProcess: runProcess, showReview: showReview, showSite: showSite, SITE: SITE, R: R, player: player, clickRow: clickRow, redo: redo, skip: skip, retry: retry, pause: pause, finish: finish, holdStart: holdStart, holdEnd: holdEnd };
     loadOptions().then(loadListScreen).then(function () { if (TEST.list) openList(TEST.list); }).catch(function (e) {
       $('warn').classList.remove('hidden');
       $('warn').textContent = 'The studio is not answering (' + e.message + '). Is the Terminal window still running studio.py?';

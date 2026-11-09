@@ -6,6 +6,8 @@ output-wav/
 
 # Your own progress and settings
 progress.json
+site-state.json
+site-upload-list.txt
 settings.json
 
 # Mac
