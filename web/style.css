@@ -231,3 +231,12 @@ button { font: inherit; color: inherit; }
 .site-pend textarea { width: 100%; min-height: 150px; max-height: 300px; background: var(--bg); color: var(--text); border: 1px solid var(--line);
   border-radius: 8px; padding: 8px; font: 12px/1.5 ui-monospace, Menlo, monospace; resize: vertical; }
 .site-pend pre { margin: 6px 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; white-space: pre-wrap; word-break: break-all; font-size: 12px; }
+
+/* your own lists (R6) */
+.card.new { border-style: dashed; color: var(--muted); display: flex; flex-direction: column; justify-content: center; }
+.card.new .c-title { color: var(--text); }
+.card .c-own { color: var(--blue); font-size: 12px; margin-left: 6px; }
+.nl-label { display: grid; gap: 6px; margin: 0 0 14px; font-size: 14px; color: var(--muted); }
+.nl-label input, .nl-label textarea { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; font: inherit; width: 100%; }
+.nl-label textarea { resize: vertical; min-height: 160px; }
+.tools-site .link { font-size: 13px; }

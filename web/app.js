@@ -247,7 +247,7 @@
     var cur = S.prompter.current();
     if (!cur) return;
     var t = { start: ev.start, end: ev.end, peak_db: ev.peakDb, rms_db: ev.rmsDb, forced: false };
-    var why = S.opt.auto_redo ? Rules.autoRedoReason(S.list.list, t, S.opt) : null;
+    var why = S.opt.auto_redo ? Rules.autoRedoReason(S.list.kind, t, S.opt) : null;
     if (why) {
       var tries = S.autoTries[cur.key] || 0;
       if (tries < S.opt.auto_redo_max_tries) {                 // not marked done: ask for it again
@@ -363,7 +363,7 @@
     var thr = Detector.thresholdFor(S.floorDb, L);
     S.detector.setThreshold(thr, Detector.releaseFor(S.floorDb, thr));
     S.detector.setStartMs(Detector.startMsFor(L));
-    S.detector.setSilenceMs(Rules.silenceMs(S.list.list, S.prompter.current(), S.opt));
+    S.detector.setSilenceMs(Rules.silenceMs(S.list.kind, S.prompter.current(), S.opt));
     var pct = Math.max(0, Math.min(100, (thr + 80) / 80 * 100));
     $('meter-thr').style.left = pct + '%';
     $('level-note').textContent = L === 0 ? 'Detection level ' + db1(thr) + ' dB'
@@ -397,12 +397,15 @@
     S.mode = 'idle';
     return Promise.all([api('GET', '/api/config'), api('GET', '/api/lists')]).then(function (r) {
       S.config = r[0];
-      var warn = $('warn');
-      if (!S.config.website_ok || S.config.settings_error) {
-        warn.classList.remove('hidden');
-        warn.textContent = S.config.settings_error ||
-          'I cannot find the website\'s CSV lists in ' + S.config.website_folder + '. Copy settings.example.json to settings.json and put the right folder in it.';
-      } else warn.classList.add('hidden');
+      var warn = $('warn'), wOk = r[1].website_ok, msgs = [];
+      if (S.config.settings_error) msgs.push(S.config.settings_error);
+      else if (!wOk && S.config.website_explicit) msgs.push('I cannot find the website\'s CSV lists in ' + S.config.website_folder + '. Only your own lists are shown. Check website_folder in settings.json.');
+      (r[1].problems || []).forEach(function (t) { msgs.push(t); });
+      warn.classList.toggle('hidden', !msgs.length);
+      warn.innerHTML = msgs.map(esc).join('<br>');
+      $('btn-site').classList.toggle('hidden', !wOk);                  // "Put on the site" only makes sense with the website folder
+      $('empty-state').classList.toggle('hidden', r[1].lists.length > 0);
+      document.querySelector('#s-list .tools').classList.toggle('hidden', r[1].lists.length === 0);
       var box = $('cards');
       box.innerHTML = '';
       var waiting = r[1].lists.filter(function (c) { return c.pending > 0; })[0];
@@ -423,11 +426,16 @@
         var count = c.ready ? (c.done + ' / ' + (c.total == null ? '?' : c.total) + ' done') : (c.total != null ? c.total + ' items' : '');
         var redoNote = c.ready && c.redo ? ' <span class="c-redo">· ' + c.redo + ' to redo</span>' : '';
         var pct = c.ready && c.total ? Math.round(100 * c.done / c.total) : 0;
-        b.innerHTML = '<div class="c-title">' + esc(c.title) + '</div><div class="c-note">' + esc(c.note) + '</div>'
+        b.innerHTML = '<div class="c-title">' + esc(c.title) + (c.custom ? '<span class="c-own">your list</span>' : '') + '</div><div class="c-note">' + esc(c.note) + '</div>'
           + '<div class="c-count">' + esc(count) + redoNote + '</div><div class="prog"><i style="width:' + pct + '%"></i></div>';
         if (c.ready) b.addEventListener('click', function () { openList(c.id); });
         box.appendChild(b);
       });
+      var nb = document.createElement('button');
+      nb.type = 'button'; nb.className = 'card new';
+      nb.innerHTML = '<div class="c-title">＋ New list</div><div class="c-note">Type or paste what you want to read</div>';
+      nb.addEventListener('click', openNewList);
+      box.appendChild(nb);
       var sel = $('tools-list'), keep = sel.value;
       sel.innerHTML = r[1].lists.filter(function (c) { return c.ready; }).map(function (c) { return '<option value="' + c.id + '">' + esc(c.title) + '</option>'; }).join('');
       if (keep) sel.value = keep;
@@ -625,12 +633,14 @@
     $('rv-title').textContent = rep && rep.errors && rep.errors.length ? 'Check your files (some problems)' : 'Check your files';
     return api('GET', '/api/review/' + R.list).then(function (r) {
       R.files = r.files; R.outDir = r.output_dir;
+      $('btn-rv-site').classList.toggle('hidden', !!r.custom || !(S.config && S.config.website_ok));
       R.files.forEach(function (f) { if (!f.review) R.sticky[f.file] = true; });
       var made = rep ? (rep.made || []).length : 0;
       $('rv-summary').textContent = rep && made
         ? (rep.rebuild ? 'Rebuilt ' : 'Cut ' + rep.cut + ' recording' + (rep.cut === 1 ? '' : 's') + ' and made ') + made + ' file' + (made === 1 ? '' : 's') + '. Listen to each one, then press OK or Redo.'
         : (rep ? 'There were no new recordings to cut. ' : '') + 'Listen to each file, then press OK or Redo. Redo puts that sound back in the list to record again.';
-      $('rv-where').innerHTML = R.files.length ? 'Files are in <code>' + esc(R.outDir) + '</code>. ▼ = a little quieter than the −20 dB target because its loudest peak hit the −1 dB limit.' : '';
+      $('rv-where').innerHTML = R.files.length ? 'Files are in <code>' + esc(R.outDir) + '</code> <button id="btn-open-out2" class="link" type="button">Show in Finder</button>. ▼ = a little quieter than the −20 dB target because its loudest peak hit the −1 dB limit.' : '';
+      var ob = $('btn-open-out2'); if (ob) ob.addEventListener('click', function () { openFolder('output'); });
       renderReview();
     }).catch(function (e) { $('rv-files').innerHTML = '<div class="prob err">' + esc(e.message) + '</div>'; });
   }
@@ -1186,6 +1196,29 @@
 
   // ── wiring ──────────────────────────────────────────────────────────────
 
+
+  // ── your own lists (R6) ─────────────────────────────────────────────────────────────────────
+  function openNewList() {
+    $('nl-title').value = ''; $('nl-text').value = ''; $('nl-msg').textContent = ''; $('nl-msg').className = 'small';
+    $('nl').classList.remove('hidden');
+    $('nl-title').focus();
+  }
+  function closeNewList() { $('nl').classList.add('hidden'); }
+  function saveNewList() {
+    var title = $('nl-title').value.trim();
+    var msg = function (t, bad) { $('nl-msg').textContent = t; $('nl-msg').className = 'small' + (bad ? ' err' : ''); };
+    if (!title) { msg('Give the list a name.', true); return; }
+    if (!$('nl-text').value.trim()) { msg('Type or paste at least one line to read.', true); return; }
+    $('nl-save').disabled = true;
+    api('POST', '/api/lists/new', { title: title, text: $('nl-text').value }).then(function (r) {
+      closeNewList();
+      return loadListScreen('List "' + title + '" made with ' + r.items + ' item' + (r.items === 1 ? '' : 's') + '. Click it to start recording.');
+    }).catch(function (e) { msg(e.message, true); }).then(function () { $('nl-save').disabled = false; });
+  }
+  function openFolder(what) {
+    api('POST', '/api/open', { what: what }).catch(function (e) { $('msg-list').textContent = e.message; });
+  }
+
   // ── 5. Put on the site (R5) ────────────────────────────────────────────────────────────────
   var SITE = { plan: null, unchecked: false, busy: false };
   var ACTION_TEXT = { add: 'new file', robot: 'replaces the robot voice', earlier: 'replaces an earlier recording of yours', same: 'already on the site' };
@@ -1345,6 +1378,11 @@
     $('btn-rv-back').addEventListener('click', function () { stopAll(); loadListScreen(); });
     $('btn-rv-site').addEventListener('click', function () { stopAll(); showSite(); });
     $('btn-site').addEventListener('click', function () { showSite(); });
+    $('btn-open-out').addEventListener('click', function () { openFolder('output'); });
+    $('btn-open-lists').addEventListener('click', function () { openFolder('lists'); });
+    $('nl-x').addEventListener('click', closeNewList);
+    $('nl-cancel').addEventListener('click', closeNewList);
+    $('nl-save').addEventListener('click', saveNewList);
     $('btn-site-back').addEventListener('click', function () { loadListScreen(); });
     $('rv-files').addEventListener('click', reviewClick);
     $('btn-playall').addEventListener('click', playAll);

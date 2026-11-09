@@ -10,9 +10,16 @@ site-state.json
 site-upload-list.txt
 settings.json
 
+# Your own lists (the example and the notes are kept)
+lists/*.csv
+!lists/_example.csv
+
 # Mac
 .DS_Store
 
 # Generated test audio (made fresh by tests/make_test_audio.py)
 tests/audio/
 __pycache__/
+
+# numpy, if start.command set it up
+.venv/

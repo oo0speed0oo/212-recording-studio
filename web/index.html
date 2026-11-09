@@ -22,11 +22,17 @@
       <span id="tocheck-text"></span>
       <button id="btn-check-files" class="btn small primary" type="button">Check the files</button>
     </div>
+    <div id="empty-state" class="notice hidden">
+      <span><b>No lists yet.</b> Press <b>＋ New list</b>, type or paste what you want to read (one item per line), and start recording.
+        You can also put a CSV file in the <code>lists</code> folder.</span>
+    </div>
     <div id="cards" class="cards"></div>
     <p id="msg-list" class="note"></p>
     <div class="tools-site">
-      <button id="btn-site" class="btn" type="button">Put on the site…</button>
+      <button id="btn-site" class="btn hidden" type="button">Put on the site…</button>
       <span id="site-hint" class="tiny"></span>
+      <button id="btn-open-out" class="link" type="button">Show my finished files</button>
+      <button id="btn-open-lists" class="link" type="button">Show the lists folder</button>
     </div>
     <div class="tiny tools">
       <div>Tools for <select id="tools-list"></select>:</div>
@@ -156,6 +162,26 @@
     <div id="busy-title" class="check-title">Cutting and filing…</div>
     <div class="bar indeterminate"><i></i></div>
     <div class="muted small">Cutting each sound out of your recording, evening out the loudness and making the files. A few seconds.</div>
+  </div>
+</div>
+
+<!-- New list -->
+<div id="nl" class="overlay hidden">
+  <div class="opt-box" role="dialog" aria-label="New list">
+    <div class="opt-head"><h2>New list</h2><button id="nl-x" class="btn small" type="button">✕</button></div>
+    <div class="opt-form">
+      <label class="nl-label">Name of the list
+        <input id="nl-title" type="text" maxlength="60" placeholder="for example: Fruit"></label>
+      <label class="nl-label">What you will read: one item per line
+        <textarea id="nl-text" rows="10" placeholder="apple&#10;banana&#10;I like red apples."></textarea></label>
+      <p class="tiny">Each line becomes one sound file, named after the text (apple.m4a). If most lines have 4 or more words, the list works like
+        Sentences: press Enter when you finish a line. The list is saved as a CSV file in the <code>lists</code> folder, so you can edit it later.</p>
+    </div>
+    <div class="opt-foot">
+      <span id="nl-msg" class="small"></span>
+      <button id="nl-cancel" class="btn" type="button">Cancel</button>
+      <button id="nl-save" class="btn primary" type="button">Make the list</button>
+    </div>
   </div>
 </div>
 

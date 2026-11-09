@@ -12,6 +12,7 @@ Where things go (all inside the studio folder, never inside the website):
     output/phonics/alone/<no>-2.m4a      the single second version (two-version sounds only; the site uses this name)
     output/phonics/words/<word>.m4a      a challenge word or common word
     output/phonics/sentences/<id>.m4a    a sentence
+    output/lists/<list>/<name>.m4a       an item of your own list (lists/<list>.csv)
 
 Everything is rebuilt from the cuts, so changing a setting (loudness, bitrate, gap...) and pressing "Rebuild"
 needs no re-recording.
@@ -171,11 +172,16 @@ def refine_region(x, sr, region):
 
 # ── the processor ────────────────────────────────────────────────────────────
 class Processor:
-    def __init__(self, root, cfg):
+    def __init__(self, root, cfg, out_root=None):
         self.root = Path(root)
         self.cfg = cfg
-        self.out = self.root / "output" / "phonics"
+        self.out_root = Path(out_root) if out_root else self.root / "output"
+        self.out = self.out_root / "phonics"                 # the website's folder layout (alone/ sounds/ words/ sentences/)
         self.wavs = self.root / "output-wav"
+
+    def path(self, rel):
+        """Where a finished file lives. 'lists/<list>/<name>.m4a' (your own lists) sits next to phonics/, the rest inside it."""
+        return self.out_root / rel if rel.startswith("lists/") else self.out / rel
 
     # -- cuts (lossless copies) --
     def cut_dir(self, list_name):
@@ -314,7 +320,7 @@ class Processor:
         """Make words/<word>.m4a or sentences/<id>.m4a from the saved cut."""
         x, sr, region = self.load_cut(list_name, key)
         seg, stats = self.make_segment(x, sr, region)
-        size = self.encode_m4a(seg, sr, self.out / rel)
+        size = self.encode_m4a(seg, sr, self.path(rel))
         return {"file": rel, "kind": kind, "version": 1, "seconds": round(len(seg) / float(sr), 3),
                 "rms_db": stats["rms_db"], "peak_db": stats["peak_db"], "gain_db": stats["gain_db"],
                 "limited_by_peak": stats["limited_by_peak"], "bytes": size, "kbps": self.cfg["aac_kbps"]}
@@ -345,7 +351,7 @@ class Processor:
         files = []
 
         def emit(rel, samples, stats, kind, ver):
-            size = self.encode_m4a(samples, sr0, self.out / rel)
+            size = self.encode_m4a(samples, sr0, self.path(rel))
             files.append({"file": rel, "kind": kind, "no": no, "version": ver, "seconds": round(len(samples) / float(sr0), 3),
                           "rms_db": stats["rms_db"], "peak_db": stats["peak_db"], "gain_db": stats["gain_db"],
                           "limited_by_peak": stats["limited_by_peak"], "bytes": size, "kbps": c["aac_kbps"]})

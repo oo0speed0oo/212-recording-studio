@@ -6,10 +6,11 @@ You read from a scrolling teleprompter into one long recording. The program find
 and (from step R2) cuts the recording up, names every file the way the website needs it,
 and puts the files in the right folders. No file work for you.
 
-**Status: step R5.** Four lists (Sounds, Challenge words, Sentences, Common words). The teleprompter records you, **Finish** cuts
+**Status: step R6.** (Friends: read [START-HERE.md](START-HERE.md).) Four lists (Sounds, Challenge words, Sentences, Common words). The teleprompter records you, **Finish** cuts
 everything out, evens out the loudness, names the files the way the website needs them and saves them, and the **check screen**
 lets you play every new file and press OK or Redo. The **⚙ Options** menu changes how it all behaves.
 **Put on the site** copies the files you marked OK into the website folder (robot voices saved first).
+**Your own lists** (`lists/*.csv`, or the ＋ New list button) work without the website, and `start.command` starts the studio with a double-click.
 
 ## Start it
 
@@ -137,7 +138,23 @@ Hold-to-record takes are never judged.
 Only options that differ from the default are written to `settings.json`. The other things in that file are two folders:
 `website_folder` (default `~/Documents/212english-website`: the CSV lists are read from there, and **Put on the site** copies files into it)
 and `local_site_folder` (default `~/Local Sites/212english-local/app/public`: the Local test copy of the site, optional).
+`output_folder` (default empty = the `output/` folder in the studio folder) says where finished files go.
 See `settings.example.json`.
+
+## Your own lists, and friends (R6)
+
+* **Own lists:** every `lists/<name>.csv` is a list (a card on the first screen). Columns: `text` (shown on screen) and optionally `name`
+  (the file name; made from the text when empty, `item-004` when the text has no Latin letters). The **＋ New list** button writes such a file
+  from pasted lines. See `lists/README.txt`. Files starting with `_` or `.` are ignored (`_example.csv` is a template).
+* **Behaviour:** if the middle item has 4+ words, the list behaves like Sentences (Enter = Done, longer automatic silence), else like words.
+* **Files:** `output/lists/<list>/<name>.m4a` (or inside `output_folder`). The studio folder's `output/phonics/` is only for the website's lists.
+  Progress keys are `item:<list>:<name>`. Own lists are never offered to **Put on the site**.
+* **Website folder is optional:** if the website's CSV lists are not found, the Sounds / Challenge words / Sentences / Common words cards and the
+  Put on the site button are hidden and only your own lists show. (If you wrote `website_folder` in `settings.json` and it is wrong, a warning says so.)
+* **`start.command`:** double-click on a Mac. It uses `STUDIO_PYTHON`, then `.venv/`, then `~/kokoro-env`, then `python3` (only if it has numpy).
+  If numpy is missing it **asks** before making `.venv` and installing numpy; it never installs without a `y`. `tests/test_start.sh` checks this with pretend Pythons.
+* **Mac only for now.** What Windows would need (not built): a `start.bat`, Python installed from python.org, another way to make `.m4a`
+  (macOS `afconvert` does it now; Windows would need ffmpeg or a bundled encoder), and `explorer` instead of `open` for "Show my finished files".
 
 ## Put on the site
 
@@ -179,6 +196,8 @@ Words and sentences are cut, levelled and named like sounds (one file each, no r
 | `output-wav/` | a lossless copy of every cut | no |
 | `progress.json` | which items are done | no |
 | `settings.json` | your settings | no |
+| `lists/` | your own lists (`*.csv`); only `README.txt` and `_example.csv` are kept in git | no |
+| `.venv/` | numpy, if `start.command` set it up | no |
 | `site-state.json`, `site-upload-list.txt` | the files put on the site that still need uploading | no |
 
 Nothing in this repo ever touches the live website. The only code that writes into the website folders is `siteput.py` (Put on the site).
@@ -190,5 +209,5 @@ tests/run_tests.sh
 ```
 
 Makes synthetic audio (tones and hiss with silences), runs the voice detector, the Redo/Skip logic, the option rules, the server and the whole
-cut-clean-encode step for all four lists on it, and "Put on the site" on throwaway folders (decoding the `.m4a` files back to check lengths, gaps, loudness and bitrate), and says ALL TESTS PASSED. To watch the whole screen run on test audio instead of a microphone, start the studio
+cut-clean-encode step for all four lists on it, "Put on the site" on throwaway folders, your own lists, and `start.command` with pretend Pythons (decoding the `.m4a` files back to check lengths, gaps, loudness and bitrate), and says ALL TESTS PASSED. To watch the whole screen run on test audio instead of a microphone, start the studio
 and open `http://localhost:8212/?testaudio=flow.wav&list=sounds&autostart=1` after running the tests once.

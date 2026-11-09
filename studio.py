@@ -11,6 +11,7 @@ which copies finished .m4a files and first moves any file it replaces into _extr
 import argparse
 import csv
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -28,11 +29,13 @@ from urllib.parse import urlparse, parse_qs
 import processing
 import siteput
 
-VERSION = "R5"
+VERSION = "R6"
 DEFAULT_PORT = 8212
 DEFAULT_MIC_TIP = ("Same distance from the microphone every time (about a fist away), "
                    "and the same gain setting on the mic. Speak across it, not straight into it.")
-DEFAULT_SETTINGS = {"website_folder": "~/Documents/212english-website",
+# (friends: website_folder is optional. Without the website's CSV lists only your own lists in lists/ are shown.
+#  output_folder = where the finished files go; empty means the output/ folder inside the studio folder.)
+DEFAULT_SETTINGS = {"website_folder": "~/Documents/212english-website", "output_folder": "",
                     # where Local (the test copy of the site) keeps its files; used by "Put on the site"
                     "local_site_folder": "~/Local Sites/212english-local/app/public"}
 
@@ -121,6 +124,8 @@ class Studio:
         self.lock = threading.Lock()
         self.settings_error = None
         self.settings = dict(DEFAULT_SETTINGS)
+        self.explicit = set()                      # the settings the user wrote in settings.json
+        self.list_problems = []
         sfile = self.root / "settings.json"
         if sfile.exists():
             try:
@@ -128,12 +133,16 @@ class Studio:
                     loaded = json.load(f)
                 if isinstance(loaded, dict):
                     self.settings.update(loaded)
+                    self.explicit = set(loaded)
             except (OSError, ValueError) as e:
                 self.settings_error = "settings.json could not be read (%s). Using the defaults." % e
         if settings_override:
             self.settings.update(settings_override)
         self.takes.mkdir(exist_ok=True)
-        self.proc = processing.Processor(self.root, processing.config_from_settings(self.settings))
+        self.lists_dir = self.root / "lists"
+        out = str(self.settings.get("output_folder") or "").strip()
+        self.proc = processing.Processor(self.root, processing.config_from_settings(self.settings),
+                                         Path(os.path.expanduser(out)) if out else None)
         self.proc_lock = threading.Lock()
 
     # ── website CSVs (read only) ───────────────────────────────────────────
@@ -198,9 +207,146 @@ class Studio:
             items.append({"key": "sentence:%s" % sid, "text": text, "id": sid, "words": len(text.split())})
         return items
 
+    # ── your own lists (R6): lists/<name>.csv ──────────────────────────────
+    def website_ok(self):
+        return self.csv_path("phonics-sounds.csv").exists()
+
+    @staticmethod
+    def slug(text, limit=40):
+        s = re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-")
+        return s[:limit].strip("-")
+
+    @classmethod
+    def custom_file_names(cls, texts, given=None):
+        """File names (without .m4a) for these texts: the given name when there is one, else made from the text.
+        Letters, digits, - and _ only; duplicates get -2, -3; text with no Latin letters becomes item-<row>."""
+        taken, out = set(), []
+        for n, text in enumerate(texts):
+            name = re.sub(r"[^A-Za-z0-9_-]+", "-", (given[n] if given and given[n] else "")).strip("-") if given else ""
+            name = name[:60] or cls.slug(text) or "item-%03d" % (n + 1)
+            base, k = name, 2
+            while name.lower() in taken:
+                name, k = "%s-%d" % (base, k), k + 1
+            taken.add(name.lower())
+            out.append(name)
+        return out
+
+    def read_custom_list(self, path):
+        """Read lists/<name>.csv. Columns: text (what you read) and, optionally, name (the file name). A header row is
+        optional: one column = the text, two columns = name, text. Returns (texts, names, problem or None)."""
+        try:
+            with open(path, encoding="utf-8-sig", newline="") as f:
+                rows = [r for r in csv.reader(f) if any(c.strip() for c in r)]
+        except (OSError, UnicodeDecodeError) as e:
+            return [], [], "could not be read (%s). Save it as CSV (UTF-8)." % e
+        if not rows:
+            return [], [], "has no rows."
+        head = [c.strip().lower() for c in rows[0]]
+        if "text" in head:
+            ti = head.index("text")
+            ni = head.index("name") if "name" in head else None
+            rows = rows[1:]
+        else:
+            ti, ni = (0, None) if len(rows[0]) < 2 else (1, 0)
+        texts, given = [], []
+        for r in rows:
+            t = (r[ti] if ti < len(r) else "").strip()
+            if t:
+                texts.append(t[:500])
+                given.append((r[ni].strip() if ni is not None and ni < len(r) else ""))
+        if not texts:
+            return [], [], "has no text to read. Put what you want to read in a column called text."
+        return texts, given, None
+
+    def custom_lists(self):
+        """{list id: list description} for every lists/*.csv. A list id is 'c-' + the file name in lowercase letters.
+        Files that cannot be used are named in self.list_problems."""
+        out, self.list_problems = {}, []
+        if not self.lists_dir.is_dir():
+            return out
+        for path in sorted(self.lists_dir.glob("*.csv"), key=lambda p: p.name.lower()):
+            if path.name.startswith(("_", ".")):
+                continue
+            texts, given, problem = self.read_custom_list(path)
+            if problem:
+                self.list_problems.append("lists/%s %s" % (path.name, problem))
+                continue
+            stem = path.stem
+            lid = "c-" + (self.slug(stem, 30) or hashlib.sha1(stem.encode("utf-8")).hexdigest()[:6])
+            base, k = lid, 2
+            while lid in out:
+                lid, k = "%s-%d" % (base, k), k + 1
+            names = self.custom_file_names(texts, given)
+            items = [{"key": "item:%s:%s" % (lid, nm), "text": t, "id": nm, "name": nm, "words": len(t.split()),
+                      "rel": "lists/%s/%s.m4a" % (lid, nm)} for t, nm in zip(texts, names)]
+            counts = sorted(it["words"] for it in items)
+            kind = "sentences" if counts[len(counts) // 2] >= 4 else "words"     # mostly 4+ words: behaves like Sentences
+            out[lid] = {"title": re.sub(r"[_]+", " ", stem), "prompt": "Read it out loud", "ready": True, "kind": kind,
+                        "custom": True, "items": items, "file": path.name,
+                        "note": "%d item%s from lists/%s" % (len(items), "" if len(items) == 1 else "s", path.name)}
+        return out
+
+    def visible_lists(self):
+        """The lists to show: your own always; the website's only when its CSV lists are there."""
+        out = dict(LISTS) if self.website_ok() else {}
+        out.update(self.custom_lists())
+        return out
+
+    def lists(self):
+        """Every list the studio knows: the website's own (Sounds ...) and your own from lists/."""
+        out = dict(LISTS)
+        out.update(self.custom_lists())
+        return out
+
+    def list_output_dir(self, name):
+        return self.proc.out_root / "lists" / name if name.startswith("c-") else self.proc.out
+
+    def new_list(self, title, text):
+        """Make lists/<title>.csv from lines of text (one item per line). The file names for the sound files are
+        written into the CSV so they never change when you edit the text later."""
+        title = re.sub(r"[\\/:*?\"<>|\x00-\x1f]+", " ", str(title or "")).strip().strip(".")[:60]
+        if not title or title.startswith("_"):
+            raise StudioError("Give the list a name.", 400)
+        lines = [l.strip() for l in str(text or "").splitlines() if l.strip()]
+        if not lines:
+            raise StudioError("Type or paste at least one line to read.", 400)
+        if len(lines) > 2000:
+            raise StudioError("That is too many lines for one list (limit 2000).", 400)
+        names = self.custom_file_names([l[:500] for l in lines])
+        path = self.lists_dir / (title + ".csv")
+        with self.lock:
+            self.lists_dir.mkdir(exist_ok=True)
+            if path.exists():
+                raise StudioError("There is already a list called \"%s\". Pick another name." % title, 409)
+            with open(path, "w", encoding="utf-8-sig", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["name", "text"])
+                for nm, l in zip(names, lines):
+                    w.writerow([nm, l[:500]])
+        lid = [k for k, v in self.custom_lists().items() if v["file"] == path.name]
+        return {"ok": True, "file": str(path), "list": lid[0] if lid else None, "items": len(lines)}
+
+    def open_folder(self, what):
+        """Show a folder in Finder (the folders are fixed; nothing comes from the web page)."""
+        if what == "output":
+            p = self.proc.out_root
+        elif what == "lists":
+            p = self.lists_dir
+        else:
+            raise StudioError("Unknown folder.", 400)
+        p.mkdir(parents=True, exist_ok=True)
+        opener = shutil.which("open")
+        if not opener:
+            raise StudioError("I cannot open folders on this computer. The folder is: %s" % p, 500)
+        subprocess.Popen([opener, str(p)])
+        return {"ok": True, "folder": str(p)}
+
     def list_items(self, name):
-        if name not in LISTS or not LISTS[name]["ready"]:
+        conf = self.lists().get(name)
+        if not conf or not conf["ready"]:
             raise StudioError("That list is not ready yet.", 404)
+        if conf.get("custom"):
+            return conf["items"]
         if name == "sounds":
             return self.sounds_items()
         if name == "words":
@@ -285,7 +431,10 @@ class Studio:
             "mic_tip": self.options()["mic_tip"],
             "website_folder": self.settings["website_folder"],
             "local_site_folder": self.settings.get("local_site_folder"),
-            "website_ok": self.csv_path("phonics-sounds.csv").exists(),
+            "website_ok": self.website_ok(),
+            "website_explicit": "website_folder" in self.explicit,      # the user wrote it in settings.json
+            "output_folder": str(self.proc.out_root),
+            "lists_folder": str(self.lists_dir),
             "settings_error": self.settings_error,
         }
 
@@ -369,7 +518,7 @@ class Studio:
         all_items, files = self.read_progress()
         recorded_by_list = {}
         cards = []
-        for name, conf in LISTS.items():
+        for name, conf in self.visible_lists().items():
             count = pending = redo = unchecked = 0
             total = None
             if conf["ready"]:
@@ -382,17 +531,18 @@ class Studio:
                     pending = sum(1 for k in keys if k in recorded)
                     redo = sum(1 for k in keys if all_items.get(k, {}).get("redo") and k not in recorded)
                     unchecked = sum(1 for rel, f in files.items() if not f.get("review") and keys & set(f.get("keys", []))
-                                    and (self.proc.out / rel).exists())
+                                    and (self.proc.path(rel)).exists())
                 except StudioError:
                     pass
             cards.append({"id": name, "title": conf["title"], "ready": conf["ready"], "note": conf["note"],
-                          "total": total, "done": count, "pending": pending, "redo": redo, "unchecked": unchecked})
-        return {"lists": cards}
+                          "total": total, "done": count, "pending": pending, "redo": redo, "unchecked": unchecked,
+                          "custom": bool(conf.get("custom"))})
+        return {"lists": cards, "problems": list(self.list_problems), "website_ok": self.website_ok()}
 
     def api_list(self, name):
-        if name not in LISTS or not LISTS[name]["ready"]:
+        conf = self.lists().get(name)
+        if not conf or not conf["ready"]:
             raise StudioError("That list is not ready yet.", 404)
-        conf = LISTS[name]
         items = self.list_items(name)
         recorded, today = self.recorded_and_today(name)
         return {"list": name, "title": conf["title"], "kind": conf["kind"], "prompt": conf["prompt"],
@@ -408,18 +558,18 @@ class Studio:
 
     def api_review(self, list_name):
         """Every file the studio made for this list, with its check state (null = not checked yet)."""
-        if list_name not in LISTS or not LISTS[list_name]["ready"]:
+        if list_name not in self.lists() or not self.lists()[list_name]["ready"]:
             raise StudioError("That list is not ready yet.", 404)
         order = {it["key"]: n for n, it in enumerate(self.list_items(list_name))}
         _, files = self.read_progress()
         site = self.website() / "portal" / "audio" / "phonics"
         out = []
         for rel, f in files.items():
-            if not (self.proc.out / rel).exists() or not (set(f.get("keys", [])) & set(order)):
+            if not (self.proc.path(rel)).exists() or not (set(f.get("keys", [])) & set(order)):
                 continue
             e = dict(f)
             e["file"] = rel
-            e["robot"] = (site / rel).is_file()
+            e["robot"] = not rel.startswith("lists/") and (site / rel).is_file()
             e["review"] = f.get("review") or None
             out.append(e)
         group_pos = {}                              # files of one sound/word stay together, in the list's order
@@ -427,7 +577,8 @@ class Studio:
             pos = min(order.get(k, 10 ** 9) for k in e.get("keys", []))
             group_pos[str(e.get("no"))] = min(pos, group_pos.get(str(e.get("no")), 10 ** 9))
         out.sort(key=lambda e: (group_pos[str(e.get("no"))], self._file_rank(e["file"]), e["file"]))
-        return {"list": list_name, "files": out, "output_dir": str(self.proc.out)}
+        return {"list": list_name, "files": out, "output_dir": str(self.list_output_dir(list_name)),
+                "custom": bool(self.lists()[list_name].get("custom"))}
 
     def set_review(self, rels, review):
         """Mark files OK or Redo (or clear with None). Redo puts the sounds in those files back in the list as not done."""
@@ -503,7 +654,9 @@ class Studio:
         _, fmeta = self.read_progress()
         chosen, counts = [], {"ok": 0, "unchecked": 0, "redo": 0, "missing": 0}
         for rel, f in fmeta.items():
-            src = self.proc.out / rel
+            src = self.proc.path(rel)
+            if rel.startswith("lists/"):                       # your own lists never go on the site
+                continue
             if not siteput.SAFE_REL.match(rel) or not src.is_file():
                 counts["missing"] += 1
                 continue
@@ -578,6 +731,14 @@ class Studio:
             self._site().log_note("Marked %d file(s) as uploaded to the live site." % n)
         return {"cleared": n}
 
+    def custom_audio_path(self, list_id, name):
+        if not re.match(r"^c-[a-z0-9-]+$", list_id) or not re.match(r"^[A-Za-z0-9_-]+\.m4a$", name):
+            raise StudioError("Not found.", 404)
+        p = self.proc.path("lists/%s/%s" % (list_id, name))
+        if not p.is_file():
+            raise StudioError("Not found.", 404)
+        return p
+
     # ── recording sessions ─────────────────────────────────────────────────
     def _paths(self, sid):
         if not SESSION_ID.match(sid):
@@ -592,7 +753,7 @@ class Studio:
             return json.load(f)
 
     def new_session(self, list_name, sample_rate, mic=None):
-        if list_name not in LISTS:
+        if list_name not in self.lists():
             raise StudioError("Unknown list.", 400)
         if not isinstance(sample_rate, int) or not (8000 <= sample_rate <= 192000):
             raise StudioError("Bad sample rate.", 400)
@@ -666,7 +827,7 @@ class Studio:
     def process_list(self, list_name, rebuild=False):
         """Cut every unfinished recording of this list into files. rebuild=True remakes ALL files from the saved
         cuts (after changing a setting such as the loudness or the bitrate)."""
-        if list_name not in LISTS or not LISTS[list_name]["ready"]:
+        if list_name not in self.lists() or not self.lists()[list_name]["ready"]:
             raise StudioError("That list is not ready yet.", 404)
         if not self.proc_lock.acquire(blocking=False):
             raise StudioError("The studio is already cutting. Wait a moment.", 409)
@@ -677,10 +838,12 @@ class Studio:
 
     @staticmethod
     def _simple_rel(kind, item):
+        if item.get("rel"):                                  # your own list
+            return item["rel"]
         return "words/%s.m4a" % item["word"] if kind == "words" else "sentences/%s.m4a" % item["id"]
 
     def _process(self, list_name, rebuild):
-        kind = LISTS[list_name]["kind"]
+        kind = self.lists()[list_name]["kind"]
         items = self.list_items(list_name)
         order = {it["key"]: n for n, it in enumerate(items)}
         by_key = {it["key"]: it for it in items}
@@ -708,7 +871,7 @@ class Studio:
                 if key not in latest or wall >= latest[key][1]:
                     latest[key] = (meta, wall, t)
 
-        report = {"cut": 0, "made": [], "waiting": [], "warnings": [], "errors": [], "output_dir": str(self.proc.out),
+        report = {"cut": 0, "made": [], "waiting": [], "warnings": [], "errors": [], "output_dir": str(self.list_output_dir(list_name)),
                   "rebuild": bool(rebuild), "sessions": len(sessions), "list": list_name}
         progress, files_meta = self.read_progress()
         touched, cut_keys = set(), []        # touched: sound numbers (sounds) or item keys (words, sentences)
@@ -796,7 +959,7 @@ class Studio:
     def reset_list(self, list_name, everything=False):
         """Start a list over. Unfinished takes move to takes/_old/<date>/. With everything=True the finished files,
         the lossless cuts and the progress of this list move there too. Nothing is ever deleted."""
-        if list_name not in LISTS:
+        if list_name not in self.lists():
             raise StudioError("Unknown list.", 400)
         dest = self.takes / "_old" / datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         moved = 0
@@ -820,7 +983,7 @@ class Studio:
                 mine_files = {rel for rel, f in fmeta.items() if keyset & set(f.get("keys", []))}
                 mine_items = {k for k in prog if k in keyset}
                 for rel in sorted(mine_files):                   # only this list's files (words/ is shared with Common words)
-                    src = self.proc.out / rel
+                    src = self.proc.path(rel)
                     if src.exists():
                         (dest / "output" / rel).parent.mkdir(parents=True, exist_ok=True)
                         shutil.move(str(src), str(dest / "output" / rel))
@@ -937,13 +1100,16 @@ def make_handler(studio, port):
                     return self.send_json(studio.api_lists())
                 if path == "/api/settings":
                     return self.send_json(studio.api_settings())
-                m = re.match(r"^/api/list/([a-z]+)$", path)
+                m = re.match(r"^/api/list/([a-z0-9-]+)$", path)
                 if m:
                     return self.send_json(studio.api_list(m.group(1)))
+                m = re.match(r"^/api/audio/out/lists/([a-z0-9-]+)/([^/]+)$", path)
+                if m:
+                    return self.send_audio(studio.custom_audio_path(m.group(1), m.group(2)))
                 m = re.match(r"^/api/audio/(out|robot)/([a-z]+)/([^/]+)$", path)
                 if m:
                     return self.send_audio(studio.audio_path(m.group(1), m.group(2), m.group(3)))
-                m = re.match(r"^/api/review/([a-z]+)$", path)
+                m = re.match(r"^/api/review/([a-z0-9-]+)$", path)
                 if m:
                     return self.send_json(studio.api_review(m.group(1)))
                 if path == "/api/site/plan":
@@ -988,6 +1154,12 @@ def make_handler(studio, port):
                 if path == "/api/review":
                     b = self.read_json()
                     return self.send_json(studio.set_review(b.get("files"), b.get("review")))
+                if path == "/api/lists/new":
+                    b = self.read_json()
+                    return self.send_json(studio.new_list(b.get("title"), b.get("text")))
+                if path == "/api/open":
+                    b = self.read_json()
+                    return self.send_json(studio.open_folder(b.get("what")))
                 if path == "/api/site/put":
                     b = self.read_json()
                     return self.send_json(studio.site_put(bool(b.get("include_unchecked"))))
@@ -1031,11 +1203,15 @@ def main():
 
     print("\n  212 Recording Studio (%s) is running." % VERSION)
     print("  Open %s  (it should open by itself)" % url)
-    print("  Website folder: %s" % studio.settings["website_folder"])
+    if studio.website_ok():
+        print("  Website folder: %s" % studio.settings["website_folder"])
+    else:
+        print("  No website folder found: only your own lists (the lists/ folder) are shown.")
+        if "website_folder" in studio.explicit:
+            print("  WARNING: cannot find the website's CSV lists in %s. Check settings.json." % studio.settings["website_folder"])
+    print("  Finished files go in: %s" % studio.proc.out_root)
     if studio.settings_error:
         print("  NOTE: " + studio.settings_error)
-    if not studio.csv_path("phonics-sounds.csv").exists():
-        print("  WARNING: cannot find the website's CSV lists there. Check settings.json.")
     print("  To stop: press Ctrl+C in this window.\n")
     if not args.no_browser:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
