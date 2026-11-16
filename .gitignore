@@ -8,6 +8,7 @@ output-wav/
 progress.json
 site-state.json
 site-upload-list.txt
+server-copy.log
 settings.json
 
 # Your own lists (the example and the notes are kept)

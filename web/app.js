@@ -404,6 +404,7 @@
       if (!S.config.encoder) msgs.push('I cannot make .m4a files on this computer: no sound encoder was found. On a Mac this comes with macOS; on other computers install ffmpeg (ffmpeg.org/download.html).');
       warn.classList.toggle('hidden', !msgs.length);
       warn.innerHTML = msgs.map(esc).join('<br>');
+      serverButton();
       $('btn-site').classList.toggle('hidden', !wOk);                  // "Put on the site" only makes sense with the website folder
       $('empty-state').classList.toggle('hidden', r[1].lists.length > 0);
       document.querySelector('#s-list .tools').classList.toggle('hidden', r[1].lists.length === 0);
@@ -994,6 +995,14 @@
       { k: 'takes_folder', t: 'path', what: 'takes', cfg: 'takes_folder', label: 'Raw recordings (saved every 30 seconds)',
         help: 'Best on this computer\'s own disk: a slow or disconnected server folder could lose a recording. Empty = the takes folder inside the studio folder.' }
     ] },
+    { title: 'Copy to my server (optional)', fields: [
+      { k: 'server_host', t: 'line', label: 'Server', placeholder: 'mike@100.79.65.95  or a name like home-server',
+        help: 'Leave empty to copy to a folder on this computer instead (a mounted drive). It signs in with an SSH key and never asks for a password. First time only, in Terminal: ssh-copy-id mike@100.79.65.95 (you type the password there yourself).' },
+      { k: 'server_folder', t: 'line', label: 'Folder to copy into', placeholder: '/mnt/data/212-recordings',
+        help: 'On the server: a full path without spaces. Empty = copying is off. It is made if it does not exist.' },
+      { k: 'server_key', t: 'line', label: 'SSH key file (optional)', placeholder: '~/.ssh/id_ed25519', help: 'Only if you use a special key file.' },
+      { k: 'server_what', t: 'enum', label: 'What to copy', choices: [['finished', 'The finished sound files'], ['all', 'Also the lossless cuts and raw recordings (a full backup)']] }
+    ] },
     { title: 'Files (for sounds you make from now on; press "Rebuild all files" on the lists screen to redo old ones)', fields: [
       { k: 'pad_s', t: 'num', label: 'Quiet kept each side of a sound', unit: 's', step: 0.01 },
       { k: 'fade_ms', t: 'num', label: 'Fade in and out', unit: 'ms', step: 1 },
@@ -1062,6 +1071,11 @@
             var n = Number(inp.value);
             return inp.value === '' || !isFinite(n) ? undefined : n;
           };
+        } else if (f.t === 'line') {
+          var li = el('input', 'line'); li.type = 'text'; li.value = v || ''; li.maxLength = sp.max; li.spellcheck = false;
+          li.placeholder = f.placeholder || '';
+          ctl.appendChild(li);
+          optGet[f.k] = function () { return li.value.trim(); }; optSet[f.k] = function (x) { li.value = x || ''; };
         } else if (f.t === 'path') {
           var pin = el('input'); pin.type = 'text'; pin.value = v || ''; pin.maxLength = sp.max; pin.className = 'pathbox';
           pin.placeholder = '(the studio\'s own folder)'; pin.spellcheck = false;
@@ -1086,6 +1100,20 @@
         if (f.t !== 'text') row.appendChild(ctl);
         if (f.help) row.appendChild(el('div', 'help', esc(f.help)));
         form.appendChild(row);
+        if (f.k === 'server_what') {
+          var tb = el('button', 'btn small', 'Test the connection'); tb.type = 'button';
+          var tw = el('div', 'of'); tw.appendChild(tb);
+          var tr = el('div', 'help', 'Uses what is typed above (you do not have to save first). It makes the folder if it is missing.');
+          tw.appendChild(tr);
+          tb.addEventListener('click', function () {
+            tb.disabled = true; tb.textContent = 'Testing…'; tr.className = 'help'; tr.textContent = 'Connecting…';
+            api('POST', '/api/server/test', { host: optGet.server_host(), folder: optGet.server_folder(), key: optGet.server_key() }).then(function (r) {
+              tr.className = 'help ' + (r.ok ? 'yes' : 'err'); tr.textContent = (r.ok ? '✓ ' : '✗ ') + r.message;
+            }).catch(function (e) { tr.className = 'help err'; tr.textContent = '✗ ' + e.message; })
+              .then(function () { tb.disabled = false; tb.textContent = 'Test the connection'; });
+          });
+          form.appendChild(tw);
+        }
         if (f.k === 'noise_suppression') {
           var b = el('button', 'btn small', 'Test the mic (3 seconds, with and without)');
           b.type = 'button'; b.id = 'btn-mt'; b.addEventListener('click', micTest);
@@ -1119,7 +1147,7 @@
     if (!Object.keys(vals).length) { optClose(); return; }
     saveOptions(vals).then(function () {
       optMsg((S.optNotes && S.optNotes.length ? S.optNotes.join(' ') + ' ' : '') + 'Saved ✓');
-      api('GET', '/api/config').then(function (c) { S.config = c; }).catch(function () {});
+      api('GET', '/api/config').then(function (c) { S.config = c; serverButton(); }).catch(function () {});
       if ('noise_suppression' in vals) {
         if (S.mode === 'record' || S.screen === 'check') toggleNs(S.opt.noise_suppression);
         else S.ns = S.opt.noise_suppression;
@@ -1241,6 +1269,34 @@
   }
   function openFolder(what) {
     api('POST', '/api/open', { what: what }).catch(function (e) { $('msg-list').textContent = e.message; });
+  }
+
+  // ── copy to my server (R8, part 2) ──────────────────────────────────────────────────────────
+  function serverButton() {
+    var on = !!(S.config && S.config.server_ready);
+    $('btn-server').classList.toggle('hidden', !on);
+    $('server-hint').textContent = on ? 'to ' + S.config.server_where : '';
+  }
+  function openServer() {
+    $('sv-where').innerHTML = 'Copy to: <code>' + esc(S.config.server_where) + '</code>';
+    $('sv-result').innerHTML = ''; $('sv-msg').textContent = ''; $('sv-msg').className = 'small';
+    $('sv').classList.remove('hidden');
+  }
+  function runServer(dry) {
+    var msg = $('sv-msg');
+    $('sv-preview').disabled = $('sv-copy').disabled = true;
+    msg.className = 'small'; msg.textContent = dry ? 'Looking…' : 'Copying… this can take a while the first time.';
+    $('sv-result').innerHTML = '';
+    api('POST', '/api/server/copy', { dry: !!dry }).then(function (r) {
+      var h = '<div class="sv-sum"><span class="chip"><b>' + r.new + '</b> new</span><span class="chip"><b>' + r.updated + '</b> replaced</span>'
+        + '<span class="chip"><b>' + r.unchanged + '</b> already there</span><span class="chip">' + (r.bytes / 1048576).toFixed(1) + ' MB</span></div>';
+      if (r.files.length) h += '<div class="sv-files">' + r.files.slice(0, 200).map(esc).join('<br>') + (r.files.length > 200 ? '<br>…' : '') + '</div>';
+      if (!dry && r.updated) h += '<p class="tiny">The old versions of the ' + r.updated + ' replaced file(s) are on the server in <code>' + esc(r.backup_folder) + '</code>.</p>';
+      $('sv-result').innerHTML = h;
+      msg.className = 'small ' + (dry ? '' : 'yes');
+      msg.textContent = dry ? 'Preview only: nothing was copied.' : (r.new + r.updated ? 'Copied ✓' : 'Everything is already there ✓');
+    }).catch(function (e) { msg.className = 'small err'; msg.textContent = e.message; })
+      .then(function () { $('sv-preview').disabled = $('sv-copy').disabled = false; });
   }
 
   // ── 5. Put on the site (R5) ────────────────────────────────────────────────────────────────
@@ -1403,6 +1459,10 @@
     $('btn-rv-site').addEventListener('click', function () { stopAll(); showSite(); });
     $('btn-site').addEventListener('click', function () { showSite(); });
     $('btn-open-out').addEventListener('click', function () { openFolder('output'); });
+    $('btn-server').addEventListener('click', openServer);
+    $('sv-x').addEventListener('click', function () { $('sv').classList.add('hidden'); });
+    $('sv-preview').addEventListener('click', function () { runServer(true); });
+    $('sv-copy').addEventListener('click', function () { runServer(false); });
     $('btn-open-lists').addEventListener('click', function () { openFolder('lists'); });
     $('nl-x').addEventListener('click', closeNewList);
     $('nl-cancel').addEventListener('click', closeNewList);

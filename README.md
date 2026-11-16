@@ -6,7 +6,7 @@ You read from a scrolling teleprompter into one long recording. The program find
 and (from step R2) cuts the recording up, names every file the way the website needs it,
 and puts the files in the right folders. No file work for you.
 
-**Status: step R8 (part 1).** (Friends: read [START-HERE.md](START-HERE.md).) Four lists (Sounds, Challenge words, Sentences, Common words). The teleprompter records you, **Finish** cuts
+**Status: step R8 (parts 1 and 2).** (Friends: read [START-HERE.md](START-HERE.md).) Four lists (Sounds, Challenge words, Sentences, Common words). The teleprompter records you, **Finish** cuts
 everything out, evens out the loudness, names the files the way the website needs them and saves them, and the **check screen**
 lets you play every new file and press OK or Redo. The **⚙ Options** menu changes how it all behaves.
 **Put on the site** copies the files you marked OK into the website folder (robot voices saved first).
@@ -175,8 +175,25 @@ recordings go (see "Where files are saved" below). `encoder` is `auto`, `afconve
 size; `tests/test_save.py` compares them). So the studio can run on Linux, for example a home server, once ffmpeg is installed. If neither is found, the first
 screen says so. The folder window needs `osascript` (Mac) or `zenity` (Linux); without them type the path.
 
-**Still to do (R8, parts 2 and 3):** copying the finished files to a server with rsync, and running the whole studio on a server (needs a secure
-https address, because browsers only allow the microphone on `localhost` or https, and a password or Tailscale-only access).
+### Copy to my server (R8, part 2)
+
+**⚙ Options → Copy to my server** sets a server and a folder on it. Then a **Copy to my server…** button appears on the first screen with
+**Preview what would be copied** (changes nothing) and **Copy now**.
+
+* **Setup (once):** (1) Tailscale connected on both computers. (2) In Options type the server, for example `mike@100.79.65.95` or a name from
+  your `~/.ssh/config` such as `home-server`, and a folder on it, for example `/mnt/data/212-recordings` (a full path, no spaces; made if missing).
+  (3) In Terminal run `ssh-copy-id mike@100.79.65.95` once (you type the server's password there yourself). (4) If ssh asks about an unknown
+  server, accept its fingerprint once with `ssh mike@100.79.65.95`. (5) Press **Test the connection**, then **Save**.
+* **It never asks for or stores a password** (SSH keys only, `BatchMode`), and never trusts an unknown server by itself. The messages say what to do.
+* **It only copies.** No `--delete` of any kind, here or on the server. A file that changed (a sound you redid) replaces the server's copy, but the
+  old version is first kept on the server in `<folder>/_replaced/<date>/`. Files only the server has are never touched.
+* **What:** the finished files go in `<folder>/output/`. Choose "Also the lossless cuts and raw recordings" for a full backup (`output-wav/`, `takes/`).
+* **Leave the server empty** to copy to another folder on this computer instead (a mounted drive or shared folder). Same rules.
+* Every copy and preview is written to `server-copy.log` in the studio folder (not uploaded to GitHub).
+* Tested with real rsync into folders and with pretend `ssh` / `rsync` programs. **Not tested against a real server yet.**
+
+**Still to do (R8, part 3):** running the whole studio on a server (needs a secure https address, because browsers only allow the microphone on
+`localhost` or https, and a password or Tailscale-only access).
 
 ## Put on the site
 

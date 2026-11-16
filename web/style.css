@@ -243,3 +243,10 @@ button { font: inherit; color: inherit; }
 
 /* where files go (R8) */
 .pathbox { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: 13px ui-monospace, Menlo, monospace; margin-bottom: 8px; }
+
+/* copy to my server (R8 part 2) */
+.sv-sum { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.sv-files { max-height: 220px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); padding: 6px 12px; font: 12px/1.7 ui-monospace, Menlo, monospace; }
+.opt-form input.line { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: 13px ui-monospace, Menlo, monospace; }
+.help.yes, .small.yes { color: var(--green); }
+.of .help.err { background: none; border: 0; padding: 0; margin: 0; color: #ffc4c8; }

@@ -28,9 +28,10 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 import processing
+import servercopy
 import siteput
 
-VERSION = "R8"
+VERSION = "R8.2"
 DEFAULT_PORT = 8212
 DEFAULT_MIC_TIP = ("Same distance from the microphone every time (about a fist away), "
                    "and the same gain setting on the mic. Speak across it, not straight into it.")
@@ -70,6 +71,11 @@ OPTION_SPEC = {
     # where files go (empty = the studio's own folders)
     "output_folder":              ("path", "", 500),
     "takes_folder":               ("path", "", 500),
+    # copy to a server (or another folder); empty folder = off
+    "server_host":                ("path", "", 200),
+    "server_folder":              ("path", "", 300),
+    "server_key":                 ("path", "", 300),
+    "server_what":                ("enum", "finished", ["finished", "all"]),
     # text
     "mic_tip":                    ("str", DEFAULT_MIC_TIP, 400),
 }
@@ -147,6 +153,7 @@ class Studio:
                                          encoder=self.settings.get("encoder", "auto"))
         self.apply_folders(startup=True)
         self.proc_lock = threading.Lock()
+        self.copy_lock = threading.Lock()
 
     # ── where files are saved ──────────────────────────────────────────────
     @staticmethod
@@ -501,6 +508,9 @@ class Studio:
             "website_explicit": "website_folder" in self.explicit,      # the user wrote it in settings.json
             "output_folder": str(self.proc.out_root),
             "takes_folder": str(self.takes),
+            "server_ready": self.server_configured(),
+            "server_where": ("%s:%s" % (self.settings.get("server_host"), self.settings.get("server_folder")) if self.settings.get("server_host")
+                             else str(self.settings.get("server_folder") or "")),
             "encoder": processing.find_encoder(self.proc.encoder)[0],
             "lists_folder": str(self.lists_dir),
             "settings_error": self.settings_error,
@@ -571,6 +581,16 @@ class Studio:
                 notes.append("Files already made stay in the old folder. On the lists screen press \"Rebuild all files\" to make them "
                              "again in the new folder (your OK / Redo marks start fresh)." if name == "output_folder" else
                              "Recordings already made stay in the old folder. New recordings go to the new one.")
+        srv = {k: str(self.settings.get("server_" + k) or "") for k in ("host", "folder", "key")}
+        if reset:
+            srv = {k: "" for k in srv}
+        if any("server_" + k in clean for k in srv):
+            srv.update({k: clean["server_" + k] for k in srv if "server_" + k in clean})
+            if srv["host"] or srv["folder"] or srv["key"]:
+                try:
+                    servercopy.validate(srv["host"], srv["folder"], srv["key"])
+                except servercopy.CopyError as e:
+                    raise StudioError(str(e), 400)
         with self.lock:
             path = self.root / "settings.json"
             current = {}
@@ -706,6 +726,47 @@ class Studio:
         if not p.is_file():
             raise StudioError("Not found.", 404)
         return p
+
+    # ── copy to a server (R8, part 2) ──────────────────────────────────────
+    def server_configured(self):
+        return bool(str(self.settings.get("server_folder") or "").strip())
+
+    def _server(self, over=None):
+        over = over if isinstance(over, dict) else {}
+        v = {k: over.get(k, self.settings.get("server_" + k, "")) for k in ("host", "folder", "key")}
+        try:
+            return servercopy.ServerCopy(v["host"], v["folder"], v["key"])
+        except servercopy.CopyError as e:
+            raise StudioError(str(e), 400)
+
+    def server_test(self, over=None):
+        """Can this computer reach the server (or folder) with the saved settings, or with the values being typed (over)?"""
+        return self._server(over).test()
+
+    def server_parts(self):
+        parts = [("output", self.proc.out_root)]
+        if self.settings.get("server_what") == "all":
+            parts += [("output-wav", self.proc.wavs), ("takes", self.takes)]
+        return parts
+
+    def server_copy(self, dry=False):
+        """Copy what is new or changed. Never deletes. dry=True only reports what would be copied."""
+        if not self.server_configured():
+            raise StudioError("No server folder is set yet. Open Options and fill in Copy to my server.", 400)
+        sc = self._server()
+        if not self.copy_lock.acquire(blocking=False):
+            raise StudioError("A copy is already running. Wait for it to finish.", 409)
+        try:
+            if not self.proc_lock.acquire(blocking=False):
+                raise StudioError("The studio is busy cutting files. Try again in a moment.", 409)
+            try:
+                return sc.copy(self.server_parts(), dry=bool(dry), log_dir=self.root)
+            except servercopy.CopyError as e:
+                raise StudioError(str(e), 502)
+            finally:
+                self.proc_lock.release()
+        finally:
+            self.copy_lock.release()
 
     # ── putting the files on the site (R5) ─────────────────────────────────
     def _site(self):
@@ -1246,6 +1307,12 @@ def make_handler(studio, port):
                 if path == "/api/lists/new":
                     b = self.read_json()
                     return self.send_json(studio.new_list(b.get("title"), b.get("text")))
+                if path == "/api/server/test":
+                    b = self.read_json()
+                    return self.send_json(studio.server_test({k: b[k] for k in ("host", "folder", "key") if k in b}))
+                if path == "/api/server/copy":
+                    b = self.read_json()
+                    return self.send_json(studio.server_copy(bool(b.get("dry"))))
                 if path == "/api/choose-folder":
                     b = self.read_json()
                     return self.send_json(studio.choose_folder(b.get("what")))

@@ -3,5 +3,9 @@
   "local_site_folder": "~/Local Sites/212english-local/app/public",
   "output_folder": "",
   "takes_folder": "",
-  "encoder": "auto"
+  "encoder": "auto",
+  "server_host": "",
+  "server_folder": "",
+  "server_key": "",
+  "server_what": "finished"
 }

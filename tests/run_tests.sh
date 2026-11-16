@@ -49,6 +49,10 @@ echo "== ffmpeg encoder and where-to-save settings (R8)"
 "$PY" -I tests/test_save.py 2>&1 | tail -4
 "$PY" -I tests/test_save.py > /dev/null 2>&1 || fail=1
 
+echo "== copy to a server: rsync, never deletes, pretend ssh (R8)"
+"$PY" -I tests/test_servercopy.py 2>&1 | tail -4
+"$PY" -I tests/test_servercopy.py > /dev/null 2>&1 || fail=1
+
 echo "== start.command (pretend Pythons, installs nothing) (R6)"
 bash tests/test_start.sh | tail -1
 bash tests/test_start.sh > /dev/null 2>&1 || fail=1

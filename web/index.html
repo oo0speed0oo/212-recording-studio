@@ -31,6 +31,8 @@
     <div class="tools-site">
       <button id="btn-site" class="btn hidden" type="button">Put on the site…</button>
       <span id="site-hint" class="tiny"></span>
+      <button id="btn-server" class="btn hidden" type="button">Copy to my server…</button>
+      <span id="server-hint" class="tiny"></span>
       <button id="btn-open-out" class="link" type="button">Show my finished files</button>
       <button id="btn-open-lists" class="link" type="button">Show the lists folder</button>
     </div>
@@ -162,6 +164,24 @@
     <div id="busy-title" class="check-title">Cutting and filing…</div>
     <div class="bar indeterminate"><i></i></div>
     <div class="muted small">Cutting each sound out of your recording, evening out the loudness and making the files. A few seconds.</div>
+  </div>
+</div>
+
+<!-- Copy to my server -->
+<div id="sv" class="overlay hidden">
+  <div class="opt-box" role="dialog" aria-label="Copy to my server">
+    <div class="opt-head"><h2>Copy to my server</h2><button id="sv-x" class="btn small" type="button">✕</button></div>
+    <div class="opt-form">
+      <p id="sv-where" class="small"></p>
+      <p class="tiny">Copies the files that are new or changed. <b>Nothing is deleted</b>, here or there. If a sound you redid is already
+        on the server, the old version is first kept in <code>_replaced</code> on the server.</p>
+      <div id="sv-result"></div>
+    </div>
+    <div class="opt-foot">
+      <span id="sv-msg" class="small"></span>
+      <button id="sv-preview" class="btn" type="button">Preview what would be copied</button>
+      <button id="sv-copy" class="btn primary" type="button">Copy now</button>
+    </div>
   </div>
 </div>
 
