@@ -12,6 +12,9 @@ lets you play every new file and press OK or Redo. The **⚙ Options** menu chan
 **Put on the site** copies the files you marked OK into the website folder (robot voices saved first).
 **Your own lists** (`lists/*.csv`, or the ＋ New list button) work without the website, and `start.command` starts the studio with a double-click.
 
+Free to use, copy and change (MIT license, see [LICENSE](LICENSE)). The Phonics word and sentence lists are **not** in this repo:
+they are read from the website folder on your own computer, or you make your own lists (see below).
+
 ## Start it
 
 Type this in Terminal (nothing to install):
