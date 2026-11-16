@@ -41,8 +41,7 @@ Your recording is saved every 30 seconds, so a crash loses almost nothing.
   **Redo** puts that item back in the list to record again.
 * Press **Show my finished files** on the first screen (or **Show in Finder** on the check screen) to open the folder.
   Your sound files are in `output/lists/<your list name>/`, one `.m4a` per item, named after the text (for example `apple.m4a`).
-* Want them somewhere else? Make a file called `settings.json` in the studio folder containing
-  `{"output_folder": "~/Documents/My recordings"}` (use your own folder) and restart the studio.
+* Want them somewhere else (your Desktop, a drive)? Press **⚙ Options**, find **Where files go**, press **Choose folder…**, then **Save**.
 
 ## If something goes wrong
 | What you see | What to do |

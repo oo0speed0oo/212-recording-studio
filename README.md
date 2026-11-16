@@ -6,7 +6,7 @@ You read from a scrolling teleprompter into one long recording. The program find
 and (from step R2) cuts the recording up, names every file the way the website needs it,
 and puts the files in the right folders. No file work for you.
 
-**Status: step R6.** (Friends: read [START-HERE.md](START-HERE.md).) Four lists (Sounds, Challenge words, Sentences, Common words). The teleprompter records you, **Finish** cuts
+**Status: step R8 (part 1).** (Friends: read [START-HERE.md](START-HERE.md).) Four lists (Sounds, Challenge words, Sentences, Common words). The teleprompter records you, **Finish** cuts
 everything out, evens out the loudness, names the files the way the website needs them and saves them, and the **check screen**
 lets you play every new file and press OK or Redo. The **⚙ Options** menu changes how it all behaves.
 **Put on the site** copies the files you marked OK into the website folder (robot voices saved first).
@@ -141,8 +141,8 @@ Hold-to-record takes are never judged.
 Only options that differ from the default are written to `settings.json`. The other things in that file are two folders:
 `website_folder` (default `~/Documents/212english-website`: the CSV lists are read from there, and **Put on the site** copies files into it)
 and `local_site_folder` (default `~/Local Sites/212english-local/app/public`: the Local test copy of the site, optional).
-`output_folder` (default empty = the `output/` folder in the studio folder) says where finished files go.
-See `settings.example.json`.
+`output_folder` and `takes_folder` (default empty = the `output/` and `takes/` folders in the studio folder) say where finished files and raw
+recordings go (see "Where files are saved" below). `encoder` is `auto`, `afconvert` or `ffmpeg`. See `settings.example.json`.
 
 ## Your own lists, and friends (R6)
 
@@ -158,6 +158,25 @@ See `settings.example.json`.
   If numpy is missing it **asks** before making `.venv` and installing numpy; it never installs without a `y`. `tests/test_start.sh` checks this with pretend Pythons.
 * **Mac only for now.** What Windows would need (not built): a `start.bat`, Python installed from python.org, another way to make `.m4a`
   (macOS `afconvert` does it now; Windows would need ffmpeg or a bundled encoder), and `explorer` instead of `open` for "Show my finished files".
+
+## Where files are saved, and other computers (R8, part 1)
+
+**⚙ Options → Where files go** has two folders, each with a **Choose folder…** button (the computer's own folder window) or you can type a full path:
+
+* **Finished sound files (.m4a)**: anywhere you can write: the Desktop, an external drive, a shared server folder. Inside it the studio makes
+  `phonics/` (the website's lists: `alone/`, `sounds/`, `words/`, `sentences/`) and `lists/<your list>/` (your own lists).
+  Files already made stay in the old folder; press **Rebuild all files** (lists screen) to make them again in the new one. Your OK / Redo marks start fresh.
+* **Raw recordings**: best on this computer's own disk (a recording is saved every 30 seconds; a disconnected server folder could lose it).
+  You cannot change this folder while a recording is waiting to be cut: press **Cut and file them now** first. Old recordings stay where they are.
+* Every folder is tested (a small file is written and removed) before it is saved. If a saved folder cannot be used at startup (a server that is not
+  connected, an unplugged drive), the studio uses its own folder instead and says so on the first screen. Nothing is moved or deleted.
+
+**Sound encoder:** the `.m4a` files are made with the Mac's `afconvert` when it exists, otherwise with `ffmpeg` (same format, length and about the same
+size; `tests/test_save.py` compares them). So the studio can run on Linux, for example a home server, once ffmpeg is installed. If neither is found, the first
+screen says so. The folder window needs `osascript` (Mac) or `zenity` (Linux); without them type the path.
+
+**Still to do (R8, parts 2 and 3):** copying the finished files to a server with rsync, and running the whole studio on a server (needs a secure
+https address, because browsers only allow the microphone on `localhost` or https, and a password or Tailscale-only access).
 
 ## Put on the site
 

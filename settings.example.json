@@ -1,5 +1,7 @@
 {
   "website_folder": "~/Documents/212english-website",
   "local_site_folder": "~/Local Sites/212english-local/app/public",
-  "output_folder": ""
+  "output_folder": "",
+  "takes_folder": "",
+  "encoder": "auto"
 }
