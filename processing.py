@@ -1,7 +1,8 @@
 """Cutting, cleaning, loudness, naming and encoding (step R2).
 
 Takes the long raw recording plus each item's start/end time and makes the small files the website needs.
-Uses only numpy, Python's standard library and the Mac's own `afconvert` (for .m4a).
+Uses only numpy, Python's standard library and an AAC encoder for the .m4a files: the Mac's own `afconvert`, or `ffmpeg`
+when there is no afconvert (Linux, Windows).
 
 Where things go (all inside the studio folder, never inside the website):
     output-wav/cuts/<list>/<key>.wav     a lossless copy of every cut (raw, with 0.4 s of room noise each side)
@@ -170,14 +171,33 @@ def refine_region(x, sr, region):
     return (first * hop / float(sr), (last + 1) * hop / float(sr)), True
 
 
+# ── the AAC encoder: afconvert (Mac) or ffmpeg ───────────────────────────────
+ENCODER_CHOICES = ("auto", "afconvert", "ffmpeg")
+
+
+def find_encoder(preference="auto"):
+    """(name, path) of the encoder to use, or (None, None). auto = afconvert when it is there (same sound as before), else ffmpeg."""
+    order = ("afconvert", "ffmpeg") if preference in (None, "", "auto") else (preference,)
+    for name in order:
+        exe = shutil.which(name)
+        if exe:
+            return name, exe
+    return None, None
+
+
 # ── the processor ────────────────────────────────────────────────────────────
 class Processor:
-    def __init__(self, root, cfg, out_root=None):
+    def __init__(self, root, cfg, out_root=None, encoder="auto"):
         self.root = Path(root)
         self.cfg = cfg
+        self.encoder = encoder if encoder in ENCODER_CHOICES else "auto"
+        self.set_out_root(out_root)
+        self.wavs = self.root / "output-wav"
+
+    def set_out_root(self, out_root=None):
+        """Where the finished files go (default: output/ in the studio folder)."""
         self.out_root = Path(out_root) if out_root else self.root / "output"
         self.out = self.out_root / "phonics"                 # the website's folder layout (alone/ sounds/ words/ sentences/)
-        self.wavs = self.root / "output-wav"
 
     def path(self, rel):
         """Where a finished file lives. 'lists/<list>/<name>.m4a' (your own lists) sits next to phonics/, the rest inside it."""
@@ -298,20 +318,26 @@ class Processor:
 
     # -- encoding --
     def encode_m4a(self, x, sr, out_path):
-        exe = shutil.which("afconvert")
+        name, exe = find_encoder(self.encoder)
         if not exe:
-            raise ProcessingError("afconvert was not found (it comes with macOS), so .m4a files cannot be made")
+            raise ProcessingError("I cannot make .m4a files: no encoder found. On a Mac afconvert comes with macOS; "
+                                  "on other computers install ffmpeg (https://ffmpeg.org/download.html)")
         out_path = Path(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         pcm = np.clip(np.round(x * 32767.0), -32768, 32767).astype("<i2")
+        kbps = int(self.cfg["aac_kbps"])
         with tempfile.TemporaryDirectory(prefix="studio-enc-") as tmp:
             src, dst = Path(tmp) / "in.wav", Path(tmp) / "out.m4a"
             write_wav_int16(src, pcm, sr)
-            # -s 0 = constant bitrate, so "64 kbps" really is 64 (the default mode goes far lower on tiny clips)
-            r = subprocess.run([exe, "-f", "m4af", "-d", "aac", "-b", str(self.cfg["aac_kbps"] * 1000), "-s", "0", "-q", "127",
-                                str(src), str(dst)], capture_output=True, text=True, timeout=120)
+            if name == "afconvert":
+                # -s 0 = constant bitrate, so "64 kbps" really is 64 (the default mode goes far lower on tiny clips)
+                cmd = [exe, "-f", "m4af", "-d", "aac", "-b", str(kbps * 1000), "-s", "0", "-q", "127", str(src), str(dst)]
+            else:
+                cmd = [exe, "-hide_banner", "-loglevel", "error", "-y", "-i", str(src), "-vn", "-c:a", "aac",
+                       "-b:a", "%dk" % kbps, "-movflags", "+faststart", str(dst)]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             if r.returncode != 0 or not dst.exists() or dst.stat().st_size == 0:
-                raise ProcessingError("afconvert failed: %s" % (r.stderr.strip() or r.stdout.strip() or "no message"))
+                raise ProcessingError("%s failed: %s" % (name, r.stderr.strip() or r.stdout.strip() or "no message"))
             os.replace(str(dst), str(out_path))
         return out_path.stat().st_size
 

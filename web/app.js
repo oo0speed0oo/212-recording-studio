@@ -46,7 +46,7 @@
     return api('GET', '/api/settings').then(function (r) { S.spec = r.spec; S.ns = r.values.noise_suppression; applyOptions(r.values); });
   }
   function saveOptions(values) {
-    return api('POST', '/api/settings', { values: values }).then(function (r) { S.spec = r.spec; applyOptions(r.values); return r.values; });
+    return api('POST', '/api/settings', { values: values }).then(function (r) { S.spec = r.spec; S.optNotes = r.notes || []; applyOptions(r.values); return r.values; });
   }
 
   function api(method, url, body, raw) {
@@ -401,6 +401,7 @@
       if (S.config.settings_error) msgs.push(S.config.settings_error);
       else if (!wOk && S.config.website_explicit) msgs.push('I cannot find the website\'s CSV lists in ' + S.config.website_folder + '. Only your own lists are shown. Check website_folder in settings.json.');
       (r[1].problems || []).forEach(function (t) { msgs.push(t); });
+      if (!S.config.encoder) msgs.push('I cannot make .m4a files on this computer: no sound encoder was found. On a Mac this comes with macOS; on other computers install ffmpeg (ffmpeg.org/download.html).');
       warn.classList.toggle('hidden', !msgs.length);
       warn.innerHTML = msgs.map(esc).join('<br>');
       $('btn-site').classList.toggle('hidden', !wOk);                  // "Put on the site" only makes sense with the website folder
@@ -987,6 +988,12 @@
       { k: 'sensitivity_margin_db', t: 'num', label: 'Detection level above the room noise', unit: 'dB', step: 1, help: 'Lower = more sensitive (picks up softer sounds, but also noise).' },
       { k: 'retry_step_db', t: 'num', label: 'Each Stop & retry lowers the level by', unit: 'dB', step: 0.5 }
     ] },
+    { title: 'Where files go', fields: [
+      { k: 'output_folder', t: 'path', what: 'output', cfg: 'output_folder', label: 'Finished sound files (.m4a)',
+        help: 'Choose any folder: your Desktop, an external drive, or a shared server folder. Empty = the output folder inside the studio folder. Files already made stay in the old folder; press "Rebuild all files" on the lists screen to make them again in the new one.' },
+      { k: 'takes_folder', t: 'path', what: 'takes', cfg: 'takes_folder', label: 'Raw recordings (saved every 30 seconds)',
+        help: 'Best on this computer\'s own disk: a slow or disconnected server folder could lose a recording. Empty = the takes folder inside the studio folder.' }
+    ] },
     { title: 'Files (for sounds you make from now on; press "Rebuild all files" on the lists screen to redo old ones)', fields: [
       { k: 'pad_s', t: 'num', label: 'Quiet kept each side of a sound', unit: 's', step: 0.01 },
       { k: 'fade_ms', t: 'num', label: 'Fade in and out', unit: 'ms', step: 1 },
@@ -1055,6 +1062,22 @@
             var n = Number(inp.value);
             return inp.value === '' || !isFinite(n) ? undefined : n;
           };
+        } else if (f.t === 'path') {
+          var pin = el('input'); pin.type = 'text'; pin.value = v || ''; pin.maxLength = sp.max; pin.className = 'pathbox';
+          pin.placeholder = '(the studio\'s own folder)'; pin.spellcheck = false;
+          var pb = el('button', 'btn small', 'Choose folder…'); pb.type = 'button';
+          var pd = el('button', 'link', 'Use the default'); pd.type = 'button';
+          var now = el('div', 'help', S.config && S.config[f.cfg] ? 'Right now: ' + esc(S.config[f.cfg]) : '');
+          pb.addEventListener('click', function () {
+            pb.disabled = true; pb.textContent = 'Waiting for the folder window…';
+            api('POST', '/api/choose-folder', { what: f.what }).then(function (r) {
+              if (!r.cancelled && r.path) pin.value = r.path;
+              optMsg(r.cancelled ? '' : 'Now press Save to keep it.');
+            }).catch(function (e) { optMsg(e.message, true); }).then(function () { pb.disabled = false; pb.textContent = 'Choose folder…'; });
+          });
+          pd.addEventListener('click', function () { pin.value = ''; });
+          ctl.appendChild(pin); ctl.appendChild(pb); ctl.appendChild(pd); ctl.appendChild(now);
+          optGet[f.k] = function () { return pin.value.trim(); }; optSet[f.k] = function (x) { pin.value = x || ''; };
         } else if (f.t === 'text') {
           var ta = el('textarea'); ta.value = v; ta.maxLength = sp.max;
           row.appendChild(ta);
@@ -1095,14 +1118,15 @@
     });
     if (!Object.keys(vals).length) { optClose(); return; }
     saveOptions(vals).then(function () {
-      optMsg('Saved ✓');
+      optMsg((S.optNotes && S.optNotes.length ? S.optNotes.join(' ') + ' ' : '') + 'Saved ✓');
+      api('GET', '/api/config').then(function (c) { S.config = c; }).catch(function () {});
       if ('noise_suppression' in vals) {
         if (S.mode === 'record' || S.screen === 'check') toggleNs(S.opt.noise_suppression);
         else S.ns = S.opt.noise_suppression;
         updateNs();
         $('ns-check').checked = S.ns;
       }
-      setTimeout(optClose, 450);
+      setTimeout(optClose, S.optNotes && S.optNotes.length ? 6000 : 450);
     }).catch(function (e) { optMsg(e.message, true); });
   }
 
@@ -1111,7 +1135,7 @@
     api('POST', '/api/settings', { reset: true }).then(function (r) {
       S.spec = r.spec; applyOptions(r.values);
       buildOptForm();
-      optMsg('Back to the defaults ✓');
+      optMsg((r.notes && r.notes.length ? r.notes.join(' ') + ' ' : '') + 'Back to the defaults ✓');
     }).catch(function (e) { optMsg(e.message, true); });
   }
 

@@ -14,6 +14,7 @@ import datetime
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import struct
@@ -29,13 +30,13 @@ from urllib.parse import urlparse, parse_qs
 import processing
 import siteput
 
-VERSION = "R6"
+VERSION = "R8"
 DEFAULT_PORT = 8212
 DEFAULT_MIC_TIP = ("Same distance from the microphone every time (about a fist away), "
                    "and the same gain setting on the mic. Speak across it, not straight into it.")
 # (friends: website_folder is optional. Without the website's CSV lists only your own lists in lists/ are shown.
 #  output_folder = where the finished files go; empty means the output/ folder inside the studio folder.)
-DEFAULT_SETTINGS = {"website_folder": "~/Documents/212english-website", "output_folder": "",
+DEFAULT_SETTINGS = {"website_folder": "~/Documents/212english-website", "output_folder": "", "takes_folder": "", "encoder": "auto",
                     # where Local (the test copy of the site) keeps its files; used by "Put on the site"
                     "local_site_folder": "~/Local Sites/212english-local/app/public"}
 
@@ -66,6 +67,9 @@ OPTION_SPEC = {
     "sentence_short_words":       ("int", 6, 1, 20),
     "sensitivity_margin_db":      ("float", 12.0, 6.0, 24.0),
     "retry_step_db":              ("float", 3.0, 1.0, 6.0),
+    # where files go (empty = the studio's own folders)
+    "output_folder":              ("path", "", 500),
+    "takes_folder":               ("path", "", 500),
     # text
     "mic_tip":                    ("str", DEFAULT_MIC_TIP, 400),
 }
@@ -119,7 +123,6 @@ class Studio:
     def __init__(self, root, settings_override=None):
         self.root = Path(root).resolve()
         self.web = self.root / "web"
-        self.takes = self.root / "takes"
         self.test_audio = self.root / "tests" / "audio"
         self.lock = threading.Lock()
         self.settings_error = None
@@ -138,12 +141,75 @@ class Studio:
                 self.settings_error = "settings.json could not be read (%s). Using the defaults." % e
         if settings_override:
             self.settings.update(settings_override)
-        self.takes.mkdir(exist_ok=True)
         self.lists_dir = self.root / "lists"
-        out = str(self.settings.get("output_folder") or "").strip()
+        self.takes = self.root / "takes"
         self.proc = processing.Processor(self.root, processing.config_from_settings(self.settings),
-                                         Path(os.path.expanduser(out)) if out else None)
+                                         encoder=self.settings.get("encoder", "auto"))
+        self.apply_folders(startup=True)
         self.proc_lock = threading.Lock()
+
+    # ── where files are saved ──────────────────────────────────────────────
+    @staticmethod
+    def check_folder(text, what="folder"):
+        """A folder the user typed or chose: it must be a full path (or start with ~), exist or be creatable, and be writable.
+        Returns the Path. Raises StudioError with a plain message."""
+        text = str(text or "").strip()
+        if not (text.startswith("~") or os.path.isabs(os.path.expanduser(text))):
+            raise StudioError("The %s must be a full path, for example /Users/you/Desktop/Recordings (or start with ~)." % what, 400)
+        p = Path(os.path.expanduser(text))
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            probe = p / (".studio-write-test-%d" % os.getpid())
+            probe.write_bytes(b"ok")
+            probe.unlink()
+        except OSError as e:
+            raise StudioError("I cannot save in %s (%s). Pick a folder you are allowed to write to; for a server folder, make sure it is connected."
+                              % (p, e.strerror or e), 400)
+        return p
+
+    def apply_folders(self, startup=False):
+        """Point the studio at the folders in the settings. At startup a folder that cannot be used (a server that is not
+        connected, a drive that is unplugged) falls back to the studio's own folder, with a note on the first screen."""
+        for name, default in (("takes_folder", self.root / "takes"), ("output_folder", None)):
+            want = str(self.settings.get(name) or "").strip()
+            target = default
+            if want:
+                try:
+                    target = self.check_folder(want, name.replace("_", " "))
+                except StudioError as e:
+                    if not startup:
+                        raise
+                    self.settings_error = "The %s in settings.json could not be used. Using the studio's own folder instead. %s" % (name.replace("_", " "), e)
+                    target = default
+            if name == "takes_folder":
+                self.takes = target
+                self.takes.mkdir(parents=True, exist_ok=True)
+            else:
+                self.proc.set_out_root(target)
+
+    def choose_folder(self, what):
+        """Open the computer's own folder chooser (on the computer the studio runs on) and return the folder picked."""
+        prompts = {"output": "Choose the folder for your finished sound files", "takes": "Choose the folder for your raw recordings"}
+        if what not in prompts:
+            raise StudioError("Unknown folder.", 400)
+        system = platform.system()
+        if system == "Darwin" and shutil.which("osascript"):
+            cmd = ["osascript", "-e", 'tell application "Finder" to activate',
+                   "-e", 'POSIX path of (choose folder with prompt "%s")' % prompts[what]]
+        elif shutil.which("zenity"):
+            cmd = ["zenity", "--file-selection", "--directory", "--title", prompts[what]]
+        else:
+            raise StudioError("I cannot open a folder chooser on this computer. Type the folder's full path instead.", 400)
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        except (OSError, subprocess.SubprocessError) as e:
+            raise StudioError("The folder chooser did not open (%s). Type the folder's full path instead." % e, 500)
+        if r.returncode != 0:
+            return {"cancelled": True, "path": None}
+        path = r.stdout.strip()
+        if len(path) > 1:
+            path = path.rstrip("/")
+        return {"cancelled": False, "path": path}
 
     # ── website CSVs (read only) ───────────────────────────────────────────
     def website(self):
@@ -335,7 +401,7 @@ class Studio:
         else:
             raise StudioError("Unknown folder.", 400)
         p.mkdir(parents=True, exist_ok=True)
-        opener = shutil.which("open")
+        opener = shutil.which("open") or shutil.which("xdg-open")
         if not opener:
             raise StudioError("I cannot open folders on this computer. The folder is: %s" % p, 500)
         subprocess.Popen([opener, str(p)])
@@ -434,6 +500,8 @@ class Studio:
             "website_ok": self.website_ok(),
             "website_explicit": "website_folder" in self.explicit,      # the user wrote it in settings.json
             "output_folder": str(self.proc.out_root),
+            "takes_folder": str(self.takes),
+            "encoder": processing.find_encoder(self.proc.encoder)[0],
             "lists_folder": str(self.lists_dir),
             "settings_error": self.settings_error,
         }
@@ -453,8 +521,10 @@ class Studio:
             return value if isinstance(value, bool) else bad("must be true or false")
         if kind == "enum":
             return value if value in spec[2] else bad("must be one of %s" % ", ".join(spec[2]))
-        if kind == "str":
-            return value[:spec[2]] if isinstance(value, str) else bad("must be text")
+        if kind in ("str", "path"):
+            if not isinstance(value, str):
+                return bad("must be text")
+            return value.strip()[:spec[2]] if kind == "path" else value[:spec[2]]
         if kind == "auto_int" and value == "auto":
             return "auto"
         if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value:
@@ -473,7 +543,7 @@ class Studio:
             e = {"type": sp[0], "default": sp[1]}
             if sp[0] == "enum":
                 e["choices"] = sp[2]
-            elif sp[0] == "str":
+            elif sp[0] in ("str", "path"):
                 e["max"] = sp[2]
             else:
                 if sp[0] != "bool":
@@ -486,6 +556,21 @@ class Studio:
         if not reset and not isinstance(values, dict):
             raise StudioError("No values given.", 400)
         clean = {} if reset else {name: self._coerce(name, v, strict=True) for name, v in values.items() if name in OPTION_SPEC}
+        notes, old = [], {n: str(self.settings.get(n) or "") for n in ("output_folder", "takes_folder")}
+        new = dict(old)
+        if reset:
+            new = {n: "" for n in new}
+        new.update({n: v for n, v in clean.items() if n in new})
+        for name in ("output_folder", "takes_folder"):
+            if new[name] != old[name]:
+                if new[name]:
+                    self.check_folder(new[name], name.replace("_", " "))       # refuse a folder that cannot be used
+                if name == "takes_folder" and any(not m.get("finished") for m in self.sessions()):
+                    raise StudioError("You have recordings that are not cut into files yet. On the lists screen press "
+                                      "\"Cut and file them now\" first, then change the folder for raw recordings.", 409)
+                notes.append("Files already made stay in the old folder. On the lists screen press \"Rebuild all files\" to make them "
+                             "again in the new folder (your OK / Redo marks start fresh)." if name == "output_folder" else
+                             "Recordings already made stay in the old folder. New recordings go to the new one.")
         with self.lock:
             path = self.root / "settings.json"
             current = {}
@@ -511,7 +596,11 @@ class Studio:
             atomic_write_json(path, current)
             self.settings_error = None
             self.proc.cfg = processing.config_from_settings(self.settings)
-        return self.api_settings()
+            if any(new[n] != old[n] for n in old):
+                self.apply_folders()
+        out = self.api_settings()
+        out["notes"] = notes
+        return out
 
     def api_lists(self):
         done = self.progress_done()
@@ -1157,6 +1246,9 @@ def make_handler(studio, port):
                 if path == "/api/lists/new":
                     b = self.read_json()
                     return self.send_json(studio.new_list(b.get("title"), b.get("text")))
+                if path == "/api/choose-folder":
+                    b = self.read_json()
+                    return self.send_json(studio.choose_folder(b.get("what")))
                 if path == "/api/open":
                     b = self.read_json()
                     return self.send_json(studio.open_folder(b.get("what")))
@@ -1210,6 +1302,8 @@ def main():
         if "website_folder" in studio.explicit:
             print("  WARNING: cannot find the website's CSV lists in %s. Check settings.json." % studio.settings["website_folder"])
     print("  Finished files go in: %s" % studio.proc.out_root)
+    enc = processing.find_encoder(studio.proc.encoder)[0]
+    print("  Sound file maker: %s" % (enc or "NONE FOUND (install ffmpeg to make .m4a files)"))
     if studio.settings_error:
         print("  NOTE: " + studio.settings_error)
     print("  To stop: press Ctrl+C in this window.\n")

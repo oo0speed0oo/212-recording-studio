@@ -240,3 +240,6 @@ button { font: inherit; color: inherit; }
 .nl-label input, .nl-label textarea { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; font: inherit; width: 100%; }
 .nl-label textarea { resize: vertical; min-height: 160px; }
 .tools-site .link { font-size: 13px; }
+
+/* where files go (R8) */
+.pathbox { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: 13px ui-monospace, Menlo, monospace; margin-bottom: 8px; }
